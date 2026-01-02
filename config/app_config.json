@@ -1,0 +1,23 @@
+{
+  "display": {
+    "width": 800,
+    "height": 480,
+    "fullscreen": true,
+    "fps": 60
+  },
+  "touch": {
+    "sensitivity": 1.0,
+    "enable_multitouch": false
+  },
+  "theme": {
+    "background_color": [20, 20, 30],
+    "primary_color": [100, 150, 255],
+    "secondary_color": [255, 150, 100],
+    "text_color": [255, 255, 255]
+  },
+  "debug": {
+    "show_fps": false,
+    "log_level": "INFO"
+  }
+}
+

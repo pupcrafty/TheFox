@@ -1,0 +1,16 @@
+{
+  "serial": {
+    "port": "/dev/ttyACM0",
+    "baudrate": 9600,
+    "timeout": 1.0,
+    "auto_connect": true
+  },
+  "protocol": {
+    "message_delimiter": "\n",
+    "max_message_length": 64
+  },
+  "debug": {
+    "log_serial": false
+  }
+}
+
