@@ -8,3 +8,6 @@ font_path = get_asset_path('fonts', 'my_font.ttf')
 font = pygame.font.Font(font_path, 24)
 ```
 
+
+
+

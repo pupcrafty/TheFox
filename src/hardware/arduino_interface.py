@@ -117,3 +117,6 @@ if __name__ == "__main__":
     else:
         print("Could not connect to Arduino. Check configuration.")
 
+
+
+

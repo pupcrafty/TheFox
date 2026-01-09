@@ -8,3 +8,6 @@ from utils.helpers import get_asset_path
 image_path = get_asset_path('images', 'my_image.png')
 ```
 
+
+
+

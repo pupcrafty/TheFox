@@ -41,3 +41,6 @@ def map_range(value, in_min, in_max, out_min, out_max):
     """Map a value from one range to another"""
     return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
 
+
+
+

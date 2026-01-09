@@ -174,3 +174,6 @@ To make the application start automatically on boot:
 - Enable debug options in config files for troubleshooting
 - Use `print()` statements or Python logging for debugging
 
+
+
+
