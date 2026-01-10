@@ -55,8 +55,8 @@ class StickFigure:
         self.moment_multiplier = 100.0  # Moment of inertia multiplier
         
         # Limb thickness for collision physics
-        self.limb_thickness = 8.0  # Thickness/radius of limb segments (increased for better collision)
-        self.collision_buffer_zone = 4.0  # Additional buffer zone around limbs for collision (prevents overlap)
+        self.limb_thickness = 12.0  # Thickness/radius of limb segments (increased for better collision)
+        self.collision_buffer_zone = 6.0  # Additional buffer zone around limbs for collision (prevents overlap) - increased
         self.max_joint_distance_factor = 1.2  # Maximum distance joints can stretch (120% of rest length)
         
         # Collision groups: limbs can collide with each other but not with directly connected parts
@@ -92,6 +92,12 @@ class StickFigure:
         self.accel_arrow_color = (255, 200, 0)
         self.accel_circle_color = (0, 255, 255)
         
+        # Torso rotation visualization
+        self.show_torso_rotation = False
+        self.rotation_arc_radius = 50
+        self.rotation_arc_color = (255, 150, 150)  # Light red
+        self.rotation_limit_color = (150, 150, 255)  # Light blue for limits
+        
         # Forces applied to upper arms and thighs (from sensors)
         # Format: (fx, fy, torque) in physics units
         self.left_upper_arm_force = (0.0, 0.0, 0.0)
@@ -124,6 +130,11 @@ class StickFigure:
         self.random_force_change_rate = 0.10  # Reduced for smoother changes
         self.last_random_update = 0
         self.random_update_interval = 50
+        
+        # Rest pose parameters - prevents drooping by maintaining a natural upright pose
+        self.maintain_rest_pose = True  # Enable/disable rest pose maintenance
+        self.rest_pose_strength = 200.0  # Strength of restorative forces toward rest pose
+        self.rest_angles = {}  # Will store target rest angles for each body
         
         # Build the physics structure
         self._build_physics_structure()
@@ -192,6 +203,11 @@ class StickFigure:
         self.torso_initial_angle = math.pi / 2  # 90 degrees (vertical)
         self.torso_max_rotation = math.radians(100)  # ±100 degrees from initial
         
+        # Shoulder rotation limits (to prevent arms wrapping around body)
+        # These are relative to the arm's initial angle
+        self.left_shoulder_max_rotation = math.radians(90)  # ±90 degrees from initial (sensible range)
+        self.right_shoulder_max_rotation = math.radians(90)  # ±90 degrees from initial (sensible range)
+        
         # Connect torso to center pivot at torso center (allows rotation but keeps centered)
         # Both anchor points are at (0, 0) in their local coordinates (center of each body)
         pivot_joint = pymunk.PinJoint(static_body, torso_body, (0, 0), (0, 0))
@@ -221,31 +237,29 @@ class StickFigure:
         head_body.position = (self.x, head_y)
         head_body.angle = 0
         
-        # Connect head to torso - allow leaning but constrain distance
+        # Connect head to torso - RIGID attachment (no leaning, fixed to torso)
         # Head attaches at bottom of head circle, torso attaches at top center (middle of shoulder base)
         head_anchor_local = (0, scaled_head_radius)  # Local to head (bottom of circle)
         torso_anchor_local = (0, -scaled_torso/2)  # Local to torso (top center of triangle)
         head_torso_joint = pymunk.PinJoint(head_body, torso_body, head_anchor_local, torso_anchor_local)
         
-        # Reduced rotational spring to allow head leaning/tilting
-        # Lower stiffness allows more rotation, moderate damping prevents oscillation
-        head_torso_spring = pymunk.DampedRotarySpring(head_body, torso_body, 0, 800.0, 80.0)  # Reduced for leaning
+        # Use GearJoint to lock head rotation to torso rotation (rigid attachment)
+        # Ratio of 1.0 means head rotates exactly with torso
+        head_torso_gear = pymunk.GearJoint(head_body, torso_body, 0, 1.0)  # 1.0 ratio = same rotation
+        # Make it very stiff
+        head_torso_gear.error_bias = 0.0  # No error tolerance
+        head_torso_gear.max_bias = 1000000.0  # Very high max bias for rigid connection
         
-        # Moderate distance spring - keeps head close but allows some movement
+        # Also add a very strong distance spring to keep head fixed in position (backup rigidity)
         head_rest_distance = 0  # Pin joint, so rest distance is 0 (touching)
         head_torso_distance_spring = pymunk.DampedSpring(head_body, torso_body, 
                                                          head_anchor_local, torso_anchor_local,
-                                                         head_rest_distance, 2000.0, 150.0)  # Moderate spring
+                                                         head_rest_distance, 50000.0, 1000.0)  # Very strong spring
         
-        self.space.add(head_torso_joint, head_torso_spring, head_torso_distance_spring)
+        self.space.add(head_torso_joint, head_torso_gear, head_torso_distance_spring)
         self.joints['head_torso'] = head_torso_joint
-        self.constraints['head_torso_spring'] = head_torso_spring
+        self.constraints['head_torso_gear'] = head_torso_gear
         self.constraints['head_torso_distance_spring'] = head_torso_distance_spring
-        
-        # Store head anchor info for distance enforcement
-        self.head_anchor_local = head_anchor_local
-        self.torso_anchor_local = torso_anchor_local
-        self.head_max_distance = self._apply_scale(15.0)  # Maximum distance head can be from anchor (small)
         
         # Arms attach directly to triangle's shoulder corners (base of triangle)
         # Left upper arm - connected to left shoulder corner of triangle (top left vertex)
@@ -253,10 +267,14 @@ class StickFigure:
         left_shoulder_local = (-triangle_width_top/2, triangle_base_top)  # Left shoulder corner of triangle
         left_shoulder_world = torso_body.local_to_world(left_shoulder_local)
         left_upper_arm.position = (left_shoulder_world.x - scaled_upper_arm/2, left_shoulder_world.y)
-        left_upper_arm.angle = math.radians(135)  # Down-left initially
+        left_upper_arm_initial_angle = math.radians(135)  # Down-left initially
+        left_upper_arm.angle = left_upper_arm_initial_angle
         left_shoulder_joint = pymunk.PinJoint(left_upper_arm, torso_body, (-scaled_upper_arm/2, 0), left_shoulder_local)
         self.space.add(left_shoulder_joint)
         self.joints['left_shoulder'] = left_shoulder_joint
+        
+        # Rotation limits will be enforced manually in update method
+        
         # Add distance constraint to prevent stretching
         left_shoulder_distance = pymunk.DampedSpring(left_upper_arm, torso_body,
                                                      (-scaled_upper_arm/2, 0), left_shoulder_local,
@@ -264,21 +282,31 @@ class StickFigure:
         self.space.add(left_shoulder_distance)
         self.constraints['left_shoulder_distance'] = left_shoulder_distance
         
+        # Store initial angle for reference
+        self.left_upper_arm_initial_angle = left_upper_arm_initial_angle
+        
         # Right upper arm - connected to right shoulder corner of triangle (top right vertex)
         right_upper_arm = self._create_limb_segment('right_upper_arm', scaled_upper_arm, self.mass * 0.8)
         right_shoulder_local = (triangle_width_top/2, triangle_base_top)  # Right shoulder corner of triangle
         right_shoulder_world = torso_body.local_to_world(right_shoulder_local)
         right_upper_arm.position = (right_shoulder_world.x - scaled_upper_arm/2, right_shoulder_world.y)
-        right_upper_arm.angle = math.radians(45)  # Down-right initially
+        right_upper_arm_initial_angle = math.radians(45)  # Down-right initially
+        right_upper_arm.angle = right_upper_arm_initial_angle
         right_shoulder_joint = pymunk.PinJoint(right_upper_arm, torso_body, (-scaled_upper_arm/2, 0), right_shoulder_local)
         self.space.add(right_shoulder_joint)
         self.joints['right_shoulder'] = right_shoulder_joint
+        
+        # Rotation limits will be enforced manually in update method
+        
         # Add distance constraint
         right_shoulder_distance = pymunk.DampedSpring(right_upper_arm, torso_body,
                                                       (-scaled_upper_arm/2, 0), right_shoulder_local,
                                                       0, 2000.0, 100.0)
         self.space.add(right_shoulder_distance)
         self.constraints['right_shoulder_distance'] = right_shoulder_distance
+        
+        # Store initial angle for reference
+        self.right_upper_arm_initial_angle = right_upper_arm_initial_angle
         
         # Left forearm - connected to end of left upper arm
         left_forearm = self._create_limb_segment('left_forearm', scaled_forearm, self.mass * 0.6)
@@ -429,107 +457,75 @@ class StickFigure:
         self.limb_lengths[name] = length  # Store length for easy access
         return body
     
-    def _enforce_head_distance(self):
+    def _enforce_rigid_head_attachment(self):
         """
-        Enforce maximum distance for head from its anchor point on triangle
-        Allows head to lean/tilt but keeps it within a small distance from anchor
-        Also prevents head from going below the shoulder line (triangle base)
+        Keep head rigidly attached to torso - match angle exactly
+        Head rotates with torso, no independent leaning
         """
         head_body = self.bodies.get('head')
         torso_body = self.bodies.get('torso')
         
-        if not head_body or not torso_body or not hasattr(self, 'head_anchor_local') or not hasattr(self, 'torso_anchor_local'):
+        if not head_body or not torso_body:
             return
         
         try:
-            scaled_torso = self._apply_scale(self.torso_length)
+            # Make head angle match torso angle exactly (rigid attachment)
+            # This ensures head never leans independently
+            head_body.angle = torso_body.angle
+            
+            # Also enforce position to keep head attached (rigid position constraint)
+            # Get anchor points
             scaled_head_radius = self._apply_scale(self.head_radius)
+            scaled_torso = self._apply_scale(self.torso_length)
             
-            # Get world positions of anchor points
-            head_anchor_world = head_body.local_to_world(self.head_anchor_local)
-            torso_anchor_world = torso_body.local_to_world(self.torso_anchor_local)
+            head_anchor_local = (0, scaled_head_radius)  # Bottom of head circle (attachment point)
+            torso_anchor_local = (0, -scaled_torso/2)  # Top of torso triangle (attachment point)
             
-            # Calculate distance between anchor points
-            if hasattr(head_anchor_world, 'x') and hasattr(torso_anchor_world, 'x'):
-                dx = float(head_anchor_world.x) - float(torso_anchor_world.x)
-                dy = float(head_anchor_world.y) - float(torso_anchor_world.y)
-            elif isinstance(head_anchor_world, (tuple, list)) and isinstance(torso_anchor_world, (tuple, list)):
-                dx = float(head_anchor_world[0]) - float(torso_anchor_world[0])
-                dy = float(head_anchor_world[1]) - float(torso_anchor_world[1])
-            else:
-                return
+            # Calculate where head center should be based on torso position and angle
+            # Head attaches at its bottom, so head center is above the attachment point
+            torso_anchor_world = torso_body.local_to_world(torso_anchor_local)
+            torso_anchor_x = float(torso_anchor_world.x) if hasattr(torso_anchor_world, 'x') else float(torso_anchor_world[0])
+            torso_anchor_y = float(torso_anchor_world.y) if hasattr(torso_anchor_world, 'y') else float(torso_anchor_world[1])
             
-            # Clamp to prevent overflow
-            dx = max(-1000, min(1000, dx))
-            dy = max(-1000, min(1000, dy))
+            # Head center is head_radius distance above the attachment point
+            # Since head rotates with torso, calculate offset in world space
+            # From attachment point, head center is up (negative local y) relative to torso
+            # Convert to world space accounting for torso rotation
+            head_offset_x = -scaled_head_radius * math.sin(torso_body.angle)
+            head_offset_y = -scaled_head_radius * math.cos(torso_body.angle)
             
-            current_distance_sq = dx * dx + dy * dy
-            if current_distance_sq > 1e6:  # Overflow protection
-                return
+            expected_head_x = torso_anchor_x + head_offset_x
+            expected_head_y = torso_anchor_y + head_offset_y
             
-            current_distance = math.sqrt(current_distance_sq)
-            max_distance = self.head_max_distance
+            # Apply strong restoring force if head position drifts
+            current_pos = head_body.position
+            current_x = float(current_pos.x) if hasattr(current_pos, 'x') else float(current_pos[0])
+            current_y = float(current_pos.y) if hasattr(current_pos, 'y') else float(current_pos[1])
             
-            # Get shoulder line position (triangle base top) in world coordinates
-            # Shoulder line is at triangle_base_top = -scaled_torso/2 in local torso coordinates
-            # We'll check both left and right shoulder corners to ensure head doesn't go past the line
-            scaled_shoulder_width = self._apply_scale(self.shoulder_width)
-            left_shoulder_local = (-scaled_shoulder_width/2, -scaled_torso/2)  # Left shoulder corner
-            right_shoulder_local = (scaled_shoulder_width/2, -scaled_torso/2)  # Right shoulder corner
+            dx = expected_head_x - current_x
+            dy = expected_head_y - current_y
             
-            left_shoulder_world = torso_body.local_to_world(left_shoulder_local)
-            right_shoulder_world = torso_body.local_to_world(right_shoulder_local)
-            
-            # Get y-coordinate of shoulder line (should be same for left and right corners)
-            shoulder_line_y_left = float(left_shoulder_world.y) if hasattr(left_shoulder_world, 'y') else float(left_shoulder_world[1])
-            shoulder_line_y_right = float(right_shoulder_world.y) if hasattr(right_shoulder_world, 'y') else float(right_shoulder_world[1])
-            shoulder_line_y = (shoulder_line_y_left + shoulder_line_y_right) / 2.0  # Average y of shoulder line
-            
-            # Get head center and bottom position
-            head_center = head_body.position
-            head_center_y = float(head_center.y) if hasattr(head_center, 'y') else float(head_center[1])
-            
-            # Head bottom is center_y + radius (positive y is downward in screen coords)
-            head_bottom_y = head_center_y + scaled_head_radius
-            
-            # Check if head goes below shoulder line (head_bottom_y > shoulder_line_y means head is below)
-            if head_bottom_y > shoulder_line_y:
-                # Head is below shoulder line - push it back up
-                excess_y = head_bottom_y - shoulder_line_y
-                # Strong upward force (negative y) to keep head above shoulder line
-                upward_force = -excess_y * 10000.0  # Very strong force to prevent head going past shoulders
-                upward_force = max(-200000.0, min(200000.0, upward_force))  # Clamp force
-                # Apply upward force at head center for more effective push
-                head_body.apply_force_at_local_point((0, upward_force), (0, 0))
+            distance = math.sqrt(dx*dx + dy*dy)
+            if distance > 0.1:  # Only apply if position has drifted
+                # Very strong restoring force to keep head rigidly attached
+                restore_force_x = dx * 100000.0
+                restore_force_y = dy * 100000.0
+                max_force = 1000000.0
+                restore_force_x = max(-max_force, min(max_force, restore_force_x))
+                restore_force_y = max(-max_force, min(max_force, restore_force_y))
+                head_body.apply_force_at_local_point((restore_force_x, restore_force_y), (0, 0))
                 
-                # Also reduce vertical velocity if head is trying to move down past shoulder line
-                if head_body.velocity.y > 0:  # Moving downward
-                    # Dampen downward velocity more aggressively
-                    head_body.velocity = (head_body.velocity.x, head_body.velocity.y * 0.5)
+                # Also set position directly if drift is too large (hard clamp)
+                if distance > 2.0:
+                    head_body.position = (expected_head_x, expected_head_y)
+                    head_body.velocity = (0, 0)  # Stop any velocity
             
-            # If distance exceeds maximum, apply restoring force
-            if current_distance > max_distance:
-                if current_distance > 0.1:  # Avoid division by zero
-                    direction_x = dx / current_distance
-                    direction_y = dy / current_distance
-                    excess_distance = current_distance - max_distance
-                    
-                    # Apply restoring force to bring head back within max distance
-                    # Strong enough to prevent stretching but not too strong to prevent leaning
-                    restore_force_strength = 3000.0  # Moderate strength - allows some movement
-                    force_x = -direction_x * excess_distance * restore_force_strength
-                    force_y = -direction_y * excess_distance * restore_force_strength
-                    
-                    # Clamp forces
-                    max_force = 50000.0
-                    force_x = max(-max_force, min(max_force, force_x))
-                    force_y = max(-max_force, min(max_force, force_y))
-                    
-                    # Apply forces at anchor points for more realistic behavior
-                    head_body.apply_force_at_local_point((force_x, force_y), self.head_anchor_local)
-                    torso_body.apply_force_at_local_point((-force_x * 0.5, -force_y * 0.5), self.torso_anchor_local)
+            # Ensure head angular velocity matches torso (rigid rotation)
+            head_body.angular_velocity = torso_body.angular_velocity
+            
         except (AttributeError, TypeError, ValueError, OverflowError, ZeroDivisionError):
             pass  # Skip if calculation fails
+    
     
     def _enforce_max_distances(self):
         """
@@ -542,8 +538,7 @@ class StickFigure:
         except:
             return  # Skip if we can't get positions
         
-        # Special enforcement for head attachment - allow leaning but constrain distance
-        self._enforce_head_distance()
+        # Head is now rigidly attached - no distance enforcement needed
         
         # Define maximum allowed distances between joint points
         # Format: (pos1_key, pos2_key, max_distance_factor, base_length)
@@ -681,6 +676,99 @@ class StickFigure:
                 # Skip this connection if calculation fails
                 continue
     
+    def _enforce_shoulder_rotation_limits(self):
+        """Enforce rotation limits on shoulder joints to prevent arms wrapping around body"""
+        torso_body = self.bodies.get('torso')
+        left_arm_body = self.bodies.get('left_upper_arm')
+        right_arm_body = self.bodies.get('right_upper_arm')
+        
+        if not torso_body:
+            return
+        
+        try:
+            torso_angle = torso_body.angle
+            
+            # Left shoulder: limit relative angle between left arm and torso
+            if left_arm_body and hasattr(self, 'left_upper_arm_initial_angle'):
+                # Calculate relative angle (arm angle - torso angle)
+                arm_angle = left_arm_body.angle
+                relative_angle = arm_angle - torso_angle
+                
+                # Normalize relative angle to [-π, π] range
+                while relative_angle > math.pi:
+                    relative_angle -= 2 * math.pi
+                while relative_angle < -math.pi:
+                    relative_angle += 2 * math.pi
+                
+                # Initial relative angle: 135° - 90° = 45° (45 degrees relative to torso)
+                initial_relative = self.left_upper_arm_initial_angle - self.torso_initial_angle
+                
+                # Allow ±90 degrees from initial relative angle
+                # This prevents arm from wrapping to the right side of body
+                min_relative = initial_relative - self.left_shoulder_max_rotation
+                max_relative = initial_relative + self.left_shoulder_max_rotation
+                
+                # Clamp relative angle if it exceeds limits
+                if relative_angle > max_relative:
+                    # Exceeded max - clamp arm angle
+                    left_arm_body.angle = torso_angle + max_relative
+                    left_arm_body.angular_velocity *= 0.5  # Dampen angular velocity
+                elif relative_angle < min_relative:
+                    # Exceeded min - clamp arm angle
+                    left_arm_body.angle = torso_angle + min_relative
+                    left_arm_body.angular_velocity *= 0.5  # Dampen angular velocity
+                
+                # Apply restoring torque if near limits
+                if abs(relative_angle - max_relative) < math.radians(10) or abs(relative_angle - min_relative) < math.radians(10):
+                    excess = max(0, abs(relative_angle) - abs(max_relative))
+                    if relative_angle > 0:
+                        restore_torque = -excess * 50000.0
+                    else:
+                        restore_torque = excess * 50000.0
+                    left_arm_body.torque += restore_torque
+            
+            # Right shoulder: limit relative angle between right arm and torso
+            if right_arm_body and hasattr(self, 'right_upper_arm_initial_angle'):
+                # Calculate relative angle (arm angle - torso angle)
+                arm_angle = right_arm_body.angle
+                relative_angle = arm_angle - torso_angle
+                
+                # Normalize relative angle to [-π, π] range
+                while relative_angle > math.pi:
+                    relative_angle -= 2 * math.pi
+                while relative_angle < -math.pi:
+                    relative_angle += 2 * math.pi
+                
+                # Initial relative angle: 45° - 90° = -45° (-45 degrees relative to torso)
+                initial_relative = self.right_upper_arm_initial_angle - self.torso_initial_angle
+                
+                # Allow ±90 degrees from initial relative angle
+                # This prevents arm from wrapping to the left side of body
+                min_relative = initial_relative - self.right_shoulder_max_rotation
+                max_relative = initial_relative + self.right_shoulder_max_rotation
+                
+                # Clamp relative angle if it exceeds limits
+                if relative_angle > max_relative:
+                    # Exceeded max - clamp arm angle
+                    right_arm_body.angle = torso_angle + max_relative
+                    right_arm_body.angular_velocity *= 0.5  # Dampen angular velocity
+                elif relative_angle < min_relative:
+                    # Exceeded min - clamp arm angle
+                    right_arm_body.angle = torso_angle + min_relative
+                    right_arm_body.angular_velocity *= 0.5  # Dampen angular velocity
+                
+                # Apply restoring torque if near limits
+                if abs(relative_angle - max_relative) < math.radians(10) or abs(relative_angle - min_relative) < math.radians(10):
+                    excess = max(0, abs(relative_angle) - abs(max_relative))
+                    if relative_angle > 0:
+                        restore_torque = -excess * 50000.0
+                    else:
+                        restore_torque = excess * 50000.0
+                    right_arm_body.torque += restore_torque
+                    
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pass  # Skip if calculation fails
+    
     def _enforce_torso_rotation_limit(self):
         """Enforce maximum rotation limit on torso (±100 degrees from initial angle)"""
         torso_body = self.bodies.get('torso')
@@ -692,56 +780,171 @@ class StickFigure:
             current_angle = torso_body.angle
             angle_diff = current_angle - self.torso_initial_angle
             
-            # Normalize angle difference to [-π, π] range
-            while angle_diff > math.pi:
-                angle_diff -= 2 * math.pi
-            while angle_diff < -math.pi:
-                angle_diff += 2 * math.pi
+            # Normalize angle difference to [-π, π] range for comparison
+            angle_diff_normalized = angle_diff
+            while angle_diff_normalized > math.pi:
+                angle_diff_normalized -= 2 * math.pi
+            while angle_diff_normalized < -math.pi:
+                angle_diff_normalized += 2 * math.pi
             
-            # Check if rotation exceeds ±100 degrees limit
-            if abs(angle_diff) > self.torso_max_rotation:
-                # Calculate how much to rotate back
-                excess_rotation = abs(angle_diff) - self.torso_max_rotation
-                
-                # Apply restoring torque to bring it back within limits
-                # Direction opposite to excess rotation
-                if angle_diff > 0:
-                    # Rotated too far clockwise, apply counter-clockwise torque
-                    restore_torque = -excess_rotation * 50000.0  # Strong restoring torque
-                    # Clamp angle to max rotation (as failsafe)
-                    max_allowed_angle = self.torso_initial_angle + self.torso_max_rotation
-                    if torso_body.angle > max_allowed_angle:
+            # Calculate allowed limits in absolute angle space
+            max_allowed_angle = self.torso_initial_angle + self.torso_max_rotation
+            min_allowed_angle = self.torso_initial_angle - self.torso_max_rotation
+            
+            # HARD CLAMP: Always clamp angle if it exceeds or equals limits (before any other calculations)
+            # Use >= to catch angles exactly at the limit and clamp them to be safe
+            angle_was_clamped = False
+            if abs(angle_diff_normalized) >= self.torso_max_rotation:
+                # Angle at or exceeds limit - clamp it immediately to exactly the limit
+                if angle_diff_normalized > 0:
+                    # Clockwise at/exceeds max - clamp to exactly max
+                    torso_body.angle = max_allowed_angle
+                    angle_diff_normalized = self.torso_max_rotation
+                elif angle_diff_normalized < 0:
+                    # Counter-clockwise at/exceeds min - clamp to exactly min
+                    torso_body.angle = min_allowed_angle
+                    angle_diff_normalized = -self.torso_max_rotation
+                else:
+                    # Exactly 0 or exactly at limit - keep it at limit (shouldn't happen but safety)
+                    if angle_diff_normalized >= 0:
                         torso_body.angle = max_allowed_angle
+                        angle_diff_normalized = self.torso_max_rotation
+                    else:
+                        torso_body.angle = min_allowed_angle
+                        angle_diff_normalized = -self.torso_max_rotation
+                angle_was_clamped = True
+                
+                # Also clamp angular velocity to zero when angle is clamped
+                torso_body.angular_velocity = 0.0
+            
+            # Check if rotation is at or near the limit (within small tolerance)
+            tolerance = 0.001  # Small tolerance in radians
+            if abs(angle_diff_normalized) >= (self.torso_max_rotation - tolerance):
+                # Calculate excess rotation if any
+                excess_rotation = abs(angle_diff_normalized) - self.torso_max_rotation
+                if excess_rotation < 0:
+                    excess_rotation = 0
+                
+                # Apply very strong restoring torque to prevent exceeding limit
+                if angle_diff_normalized > 0:
+                    # Rotated too far clockwise, apply counter-clockwise torque
+                    restore_torque = -(excess_rotation + 0.01) * 200000.0  # Very strong torque
                 else:
                     # Rotated too far counter-clockwise, apply clockwise torque
-                    restore_torque = excess_rotation * 50000.0
-                    # Clamp angle to min rotation (as failsafe)
-                    min_allowed_angle = self.torso_initial_angle - self.torso_max_rotation
-                    if torso_body.angle < min_allowed_angle:
-                        torso_body.angle = min_allowed_angle
+                    restore_torque = (excess_rotation + 0.01) * 200000.0
                 
                 # Clamp torque to prevent overflow
-                max_torque = 200000.0
+                max_torque = 500000.0
                 restore_torque = max(-max_torque, min(max_torque, restore_torque))
                 
                 # Apply restoring torque
                 torso_body.torque += restore_torque
                 
-                # Also reduce angular velocity to help prevent overshooting
-                if abs(torso_body.angular_velocity) > 0.1:
-                    # Dampen angular velocity more aggressively when at limits
-                    torso_body.angular_velocity *= 0.6  # More aggressive damping
+                # Aggressively control angular velocity when at limits
+                if abs(torso_body.angular_velocity) > 0.01:
+                    # If rotating in the direction that would push past limit, stop it
+                    if angle_diff_normalized >= (self.torso_max_rotation - tolerance) and torso_body.angular_velocity > 0:
+                        # At/near max limit rotating clockwise - stop or reverse
+                        torso_body.angular_velocity = -abs(torso_body.angular_velocity) * 0.3  # Reverse and dampen
+                    elif angle_diff_normalized <= -(self.torso_max_rotation - tolerance) and torso_body.angular_velocity < 0:
+                        # At/near min limit rotating counter-clockwise - stop or reverse
+                        torso_body.angular_velocity = abs(torso_body.angular_velocity) * 0.3  # Reverse and dampen
+                    else:
+                        # Very aggressive damping when at limits
+                        torso_body.angular_velocity *= 0.2  # Very aggressive damping
+                
+                # Final safety clamp - double-check angle hasn't exceeded limit (use >= for safety)
+                final_angle = torso_body.angle
+                final_angle_diff = final_angle - self.torso_initial_angle
+                # Normalize final angle diff
+                while final_angle_diff > math.pi:
+                    final_angle_diff -= 2 * math.pi
+                while final_angle_diff < -math.pi:
+                    final_angle_diff += 2 * math.pi
+                
+                # Hard clamp if at or exceeded limit (use >= to ensure it never exceeds)
+                if final_angle_diff >= self.torso_max_rotation:
+                    torso_body.angle = max_allowed_angle
+                    torso_body.angular_velocity = 0.0
+                    # Clear any accumulated torque that might push past limit
+                    torso_body.torque = 0.0
+                elif final_angle_diff <= -self.torso_max_rotation:
+                    torso_body.angle = min_allowed_angle
+                    torso_body.angular_velocity = 0.0
+                    # Clear any accumulated torque that might push past limit
+                    torso_body.torque = 0.0
                     
-                # If angular velocity would push past limit, clamp it
-                if angle_diff > 0 and torso_body.angular_velocity > 0:
-                    # Rotating clockwise past limit - stop or reverse
-                    torso_body.angular_velocity = min(0.0, torso_body.angular_velocity * 0.3)
-                elif angle_diff < 0 and torso_body.angular_velocity < 0:
-                    # Rotating counter-clockwise past limit - stop or reverse
-                    torso_body.angular_velocity = max(0.0, torso_body.angular_velocity * 0.3)
         except (AttributeError, TypeError, ValueError, OverflowError):
             # Skip if calculation fails
             pass
+    
+    def _maintain_rest_pose(self, dt):
+        """
+        Apply gentle restorative forces/torques to maintain a natural upright pose
+        Prevents drooping by bringing limbs back toward rest angles
+        """
+        if not self.rest_angles:
+            return
+        
+        for name, body in self.bodies.items():
+            if name == 'center_pivot':  # Skip static pivot
+                continue
+            
+            # Skip head - it's rigidly attached, angle is enforced separately
+            if name == 'head':
+                continue
+            
+            rest_angle = self.rest_angles.get(name)
+            if rest_angle is None:
+                continue
+            
+            try:
+                current_angle = body.angle
+                angle_diff = current_angle - rest_angle
+                
+                # Normalize angle difference to [-π, π] range
+                while angle_diff > math.pi:
+                    angle_diff -= 2 * math.pi
+                while angle_diff < -math.pi:
+                    angle_diff += 2 * math.pi
+                
+                # Apply restorative torque toward rest angle
+                # Only apply if angle is significantly off (to allow dynamic movement)
+                if abs(angle_diff) > math.radians(5):  # 5 degree threshold
+                    # Gentle restorative torque - stronger as deviation increases
+                    restore_torque = -angle_diff * self.rest_pose_strength
+                    
+                    # Scale torque based on body type - lighter for force-applied bodies
+                    force_applied_bodies = ['left_upper_arm', 'right_upper_arm', 'left_thigh', 'right_thigh']
+                    if name in force_applied_bodies:
+                        restore_torque *= 0.5  # Half strength for bodies with applied forces
+                    
+                    # Clamp torque to prevent overflow
+                    max_torque = 10000.0
+                    restore_torque = max(-max_torque, min(max_torque, restore_torque))
+                    body.torque += restore_torque
+                
+                # Skip head - it's rigidly attached to torso, angle/position handled separately
+                if name == 'head':
+                    continue  # Head is rigidly attached, no independent rest pose
+                
+                # For torso: apply gentle upward force at top to prevent forward lean
+                if name == 'torso':
+                    torso_body = body
+                    # Apply upward force at top of torso to counteract forward lean
+                    torso_top_local = (0, -self._apply_scale(self.torso_length / 2))
+                    upward_force_y = -self.rest_pose_strength * 0.2  # Upward force
+                    # Only apply if torso is leaning forward significantly
+                    angle_from_vertical = abs(angle_diff)
+                    if angle_from_vertical > math.radians(10):  # More than 10 degrees from vertical
+                        lean_correction = self.rest_pose_strength * 0.3 * (angle_from_vertical / math.pi)
+                        # Apply force perpendicular to torso to straighten it
+                        correction_force_x = math.sin(angle_diff) * lean_correction
+                        correction_force_y = -abs(math.cos(angle_diff)) * lean_correction  # Upward
+                        torso_body.apply_force_at_local_point((correction_force_x, correction_force_y), torso_top_local)
+                
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                pass  # Skip if calculation fails
     
     def _apply_damping(self, dt):
         """Apply damping to all bodies - less damping for bodies with applied forces"""
@@ -910,25 +1113,58 @@ class StickFigure:
         # Bodies should already be positioned correctly during construction
         # Just ensure angles are set for a natural pose
         
-        # Arms hanging down
+        # Store rest angles for rest pose maintenance (upright, natural pose)
+        # Torso: vertical (90 degrees)
+        # Head: same as torso (rigidly attached, no independent angle)
+        self.rest_angles['torso'] = math.pi / 2  # 90 degrees (vertical)
+        self.rest_angles['head'] = math.pi / 2  # Head matches torso angle (rigid attachment)
+        
+        # Arms: slightly outward and down (more upright than drooping)
+        self.rest_angles['left_upper_arm'] = math.radians(120)  # More outward, less drooped
+        self.rest_angles['right_upper_arm'] = math.radians(60)  # More outward, less drooped
+        self.rest_angles['left_forearm'] = math.radians(150)  # Extend from upper arm
+        self.rest_angles['right_forearm'] = math.radians(30)  # Extend from upper arm
+        
+        # Legs: mostly vertical, slightly splayed
+        self.rest_angles['left_thigh'] = math.radians(95)  # Slightly outward
+        self.rest_angles['right_thigh'] = math.radians(85)  # Slightly outward
+        self.rest_angles['left_shin'] = math.radians(95)  # Continue from thigh
+        self.rest_angles['right_shin'] = math.radians(85)  # Continue from thigh
+        
+        # Apply initial angles
         left_arm_body = self.bodies.get('left_upper_arm')
         if left_arm_body:
-            left_arm_body.angle = math.radians(135)  # Down-left
+            left_arm_body.angle = self.rest_angles['left_upper_arm']
         
         right_arm_body = self.bodies.get('right_upper_arm')
         if right_arm_body:
-            right_arm_body.angle = math.radians(45)  # Down-right
+            right_arm_body.angle = self.rest_angles['right_upper_arm']
         
         # Forearms extend from upper arms
         left_forearm_body = self.bodies.get('left_forearm')
         if left_forearm_body:
-            left_forearm_body.angle = math.radians(135)
+            left_forearm_body.angle = self.rest_angles['left_forearm']
         
         right_forearm_body = self.bodies.get('right_forearm')
         if right_forearm_body:
-            right_forearm_body.angle = math.radians(45)
+            right_forearm_body.angle = self.rest_angles['right_forearm']
         
         # Legs already positioned, angles already set during construction
+        left_thigh_body = self.bodies.get('left_thigh')
+        if left_thigh_body:
+            left_thigh_body.angle = self.rest_angles['left_thigh']
+        
+        right_thigh_body = self.bodies.get('right_thigh')
+        if right_thigh_body:
+            right_thigh_body.angle = self.rest_angles['right_thigh']
+        
+        left_shin_body = self.bodies.get('left_shin')
+        if left_shin_body:
+            left_shin_body.angle = self.rest_angles['left_shin']
+        
+        right_shin_body = self.bodies.get('right_shin')
+        if right_shin_body:
+            right_shin_body.angle = self.rest_angles['right_shin']
     
     def _apply_scale(self, value):
         """Apply scale to a value"""
@@ -955,6 +1191,10 @@ class StickFigure:
     def set_show_accelerations(self, show):
         """Enable or disable acceleration visualization"""
         self.show_accelerations = show
+    
+    def set_show_torso_rotation(self, show):
+        """Enable or disable torso rotation visualization"""
+        self.show_torso_rotation = show
     
     def set_force(self, limb, force):
         """
@@ -1117,14 +1357,27 @@ class StickFigure:
         if self.apply_normalizing_forces:
             self._apply_normalizing_forces(dt)
         
-        # Enforce rotation limits on torso (max ±100 degrees)
+        # Enforce rotation limits on torso BEFORE physics step (max ±100 degrees)
         self._enforce_torso_rotation_limit()
+        
+        # Keep head rigidly attached to torso (match angle every frame)
+        self._enforce_rigid_head_attachment()
+        
+        # Maintain rest pose to prevent drooping (apply before damping)
+        if self.maintain_rest_pose:
+            self._maintain_rest_pose(dt)
         
         # Apply damping to all bodies
         self._apply_damping(dt)
         
         # Step the physics simulation
         self.space.step(dt)
+        
+        # Enforce rotation limits AGAIN AFTER physics step to catch any overshoot
+        self._enforce_torso_rotation_limit()
+        
+        # Enforce shoulder rotation limits to prevent arms wrapping around body
+        self._enforce_shoulder_rotation_limits()
     
     def _vec_to_tuple(self, vec):
         """Convert pymunk Vec2d to tuple of floats"""
@@ -1312,8 +1565,11 @@ class StickFigure:
         except Exception as e:
             print(f"Error drawing head: {e}, head_center: {head_center if 'head_center' in locals() else 'unknown'}")
         
-        # Calculate visual thickness for drawing
-        visual_thickness = max(self.line_width, int(self._apply_scale(self.limb_thickness * 0.5)))
+        # Calculate visual thickness for drawing - match collision thickness for visual accuracy
+        # Collision thickness = limb_thickness (12.0) + collision_buffer_zone (6.0) = 18.0 total
+        # Visual should match collision for better representation
+        collision_thickness_total = self.limb_thickness + self.collision_buffer_zone  # Total collision radius
+        visual_thickness = max(self.line_width, int(self._apply_scale(collision_thickness_total * 0.6)))  # 60% of collision for visual
         
         # Draw torso as a triangle (T-shaped body)
         # Calculate triangle vertices in world coordinates
@@ -1399,6 +1655,10 @@ class StickFigure:
         # Draw acceleration visualizations if enabled
         if self.show_accelerations:
             self._draw_accelerations(surface, positions)
+        
+        # Draw torso rotation visualization if enabled
+        if self.show_torso_rotation:
+            self._draw_torso_rotation(surface)
     
     def _draw_accelerations(self, surface, positions):
         """Draw acceleration visualization: circles at force points and arrows for 3D forces"""
@@ -1489,6 +1749,145 @@ class StickFigure:
             (arrowhead_x1, arrowhead_y1),
             (arrowhead_x2, arrowhead_y2)
         ])
+    
+    def _draw_torso_rotation(self, surface):
+        """Draw torso rotation visualization: arc showing current angle and rotation limits"""
+        torso_body = self.bodies.get('torso')
+        if not torso_body or not hasattr(self, 'torso_initial_angle') or not hasattr(self, 'torso_max_rotation'):
+            return
+        
+        try:
+            # Get torso center position
+            torso_pos = torso_body.position
+            center_x = float(torso_pos.x) if hasattr(torso_pos, 'x') else float(torso_pos[0])
+            center_y = float(torso_pos.y) if hasattr(torso_pos, 'y') else float(torso_pos[1])
+            center = (int(center_x), int(center_y))
+            
+            # Get current angle and calculate angle difference from initial
+            current_angle = torso_body.angle
+            angle_diff = current_angle - self.torso_initial_angle
+            
+            # Normalize angle difference to [-π, π] range
+            while angle_diff > math.pi:
+                angle_diff -= 2 * math.pi
+            while angle_diff < -math.pi:
+                angle_diff += 2 * math.pi
+            
+            # Calculate rotation limits in radians
+            max_rotation_rad = self.torso_max_rotation
+            
+            # Draw arc radius (scaled)
+            arc_radius = int(self._apply_scale(self.rotation_arc_radius))
+            
+            # Draw rotation limits as semi-transparent arcs (blue)
+            # Maximum clockwise limit
+            max_cw_angle = self.torso_initial_angle + max_rotation_rad
+            max_ccw_angle = self.torso_initial_angle - max_rotation_rad
+            
+            # Draw limit arcs (only visible portion)
+            limit_arc_thickness = 3
+            # Clockwise limit
+            cw_start_angle_deg = math.degrees(max_cw_angle) - 5
+            cw_end_angle_deg = math.degrees(max_cw_angle) + 5
+            pygame.draw.arc(surface, self.rotation_limit_color, 
+                          (center_x - arc_radius, center_y - arc_radius, 
+                           arc_radius * 2, arc_radius * 2),
+                          math.radians(cw_start_angle_deg), 
+                          math.radians(cw_end_angle_deg),
+                          limit_arc_thickness)
+            
+            # Counter-clockwise limit
+            ccw_start_angle_deg = math.degrees(max_ccw_angle) - 5
+            ccw_end_angle_deg = math.degrees(max_ccw_angle) + 5
+            pygame.draw.arc(surface, self.rotation_limit_color, 
+                          (center_x - arc_radius, center_y - arc_radius, 
+                           arc_radius * 2, arc_radius * 2),
+                          math.radians(ccw_start_angle_deg), 
+                          math.radians(ccw_end_angle_deg),
+                          limit_arc_thickness)
+            
+            # Draw current rotation arc (red) - arc from initial angle to current angle
+            initial_angle_deg = math.degrees(self.torso_initial_angle)
+            current_angle_deg = math.degrees(current_angle)
+            
+            # Draw arc showing rotation from initial to current
+            # Pygame's arc draws from start_angle to end_angle, counter-clockwise
+            # We want to show the difference, so draw from initial to current
+            if abs(angle_diff) > 0.01:  # Only draw if there's significant rotation
+                # Determine start and end angles for the arc
+                if angle_diff > 0:
+                    # Clockwise rotation (angle_diff is positive)
+                    arc_start = math.radians(initial_angle_deg)
+                    arc_end = math.radians(current_angle_deg)
+                else:
+                    # Counter-clockwise rotation (angle_diff is negative)
+                    arc_start = math.radians(current_angle_deg)
+                    arc_end = math.radians(initial_angle_deg)
+                
+                pygame.draw.arc(surface, self.rotation_arc_color,
+                              (center_x - arc_radius, center_y - arc_radius,
+                               arc_radius * 2, arc_radius * 2),
+                              arc_start, arc_end,
+                              4)  # Thicker line for current rotation
+            
+            # Draw arrow from center showing current rotation direction and magnitude
+            if abs(angle_diff) > 0.01:
+                # Calculate arrow endpoint based on current angle
+                arrow_length = arc_radius * 0.7
+                # Initial angle is π/2 (vertical up), so subtract π/2 to align with vertical
+                arrow_end_x = center_x + arrow_length * math.cos(current_angle - math.pi / 2)
+                arrow_end_y = center_y + arrow_length * math.sin(current_angle - math.pi / 2)
+                arrow_end = (int(arrow_end_x), int(arrow_end_y))
+                
+                # Draw arrow
+                self._draw_arrow(surface, center, arrow_end, self.rotation_arc_color, 3)
+            
+            # Draw text showing angle in degrees - make it more visible
+            angle_deg = math.degrees(angle_diff)
+            
+            # Create font for text display
+            try:
+                # Try to use a system font first, fallback to default
+                font = pygame.font.Font(None, 32)  # Larger font for better visibility
+            except:
+                try:
+                    font = pygame.font.SysFont('Arial', 28)
+                except:
+                    font = pygame.font.Font(pygame.font.get_default_font(), 24)
+            
+            if font:
+                # Draw rotation value text with background for better visibility
+                angle_text = f"Rotation: {angle_deg:+.1f}°"  # + sign shows direction
+                
+                # Render text with anti-aliasing
+                text_surface = font.render(angle_text, True, self.rotation_arc_color)
+                text_x = int(center_x + arc_radius + 15)
+                text_y = int(center_y - 40)
+                
+                # Draw background rectangle for text readability (solid black, no alpha)
+                bg_rect = pygame.Rect(text_x - 5, text_y - 2, text_surface.get_width() + 10, text_surface.get_height() + 4)
+                pygame.draw.rect(surface, (0, 0, 0), bg_rect)  # Black background
+                
+                surface.blit(text_surface, (text_x, text_y))
+                
+                # Draw text showing max limits
+                max_limit_text = f"Max: ±{math.degrees(max_rotation_rad):.0f}°"
+                limit_text_surface = font.render(max_limit_text, True, self.rotation_limit_color)
+                limit_bg_rect = pygame.Rect(text_x - 5, text_y + 28, limit_text_surface.get_width() + 10, limit_text_surface.get_height() + 4)
+                pygame.draw.rect(surface, (0, 0, 0), limit_bg_rect)  # Black background
+                surface.blit(limit_text_surface, (text_x, text_y + 30))
+                
+                # Also draw absolute current angle from vertical (0° = vertical)
+                current_abs_angle = math.degrees(current_angle) % 360
+                abs_angle_text = f"Angle: {current_abs_angle:.1f}°"
+                abs_text_surface = font.render(abs_angle_text, True, (200, 200, 200))  # Gray color
+                abs_bg_rect = pygame.Rect(text_x - 5, text_y + 58, abs_text_surface.get_width() + 10, abs_text_surface.get_height() + 4)
+                pygame.draw.rect(surface, (0, 0, 0), abs_bg_rect)  # Black background
+                surface.blit(abs_text_surface, (text_x, text_y + 60))
+            
+        except (AttributeError, TypeError, ValueError, OverflowError) as e:
+            # Skip if calculation fails
+            pass
     
     def cleanup(self):
         """Clean up physics resources"""

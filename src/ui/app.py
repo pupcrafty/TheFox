@@ -85,10 +85,16 @@ class TouchScreenApp:
         self.button_padding = 20
         
         # Initialize stick figure
+        # Calculate scale to make stick figure take up 1/3 of screen height
+        # Base dimensions: head (30) + torso (60) + thigh (45) + shin (40) = 175 at scale 1.0
+        base_height = 175.0
+        target_height = screen_height / 3.0
+        calculated_scale = target_height / base_height
+        
         self.stick_figure = StickFigure(
             x=screen_width // 2,
             y=screen_height // 2 - 50,
-            scale=1.0  # Reduced scale - was 1.5
+            scale=calculated_scale  # Scale relative to screen height (1/3 of screen)
         )
         self.stick_figure.set_color(tuple(self.theme['text_color']))
         
@@ -181,6 +187,8 @@ class TouchScreenApp:
             
             # Toggle acceleration visualization on screen click
             self.stick_figure.set_show_accelerations(not self.stick_figure.show_accelerations)
+            # Also toggle torso rotation visualization on click
+            self.stick_figure.set_show_torso_rotation(not self.stick_figure.show_torso_rotation)
     
     def update(self):
         """Update application state"""
