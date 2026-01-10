@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.config import load_all_config
 from hardware.arduino_interface import ArduinoInterface
 from ui.stick_figure import StickFigure
+from ui.fluid_emitter import FluidEmitterSystem
 
 
 class TouchScreenApp:
@@ -97,6 +98,16 @@ class TouchScreenApp:
             scale=calculated_scale  # Scale relative to screen height (1/3 of screen)
         )
         self.stick_figure.set_color(tuple(self.theme['text_color']))
+        
+        # Initialize fluid emitter system
+        # Use the same space as stick figure
+        # Particles will have gravity applied manually (since stick figure overrides space gravity)
+        self.fluid_emitter = FluidEmitterSystem(
+            stick_figure=self.stick_figure,
+            space=self.stick_figure.space,
+            screen_width=screen_width,
+            screen_height=screen_height
+        )
         
         print("Application initialized successfully")
     
@@ -200,6 +211,9 @@ class TouchScreenApp:
         # Update stick figure with acceleration-based movement
         self.stick_figure.update(dt)
         
+        # Update fluid emitter system
+        self.fluid_emitter.update(dt)
+        
         # Handle button fading
         if self.screen_clicked:
             time_since_click = current_time - self.last_click_time
@@ -284,6 +298,9 @@ class TouchScreenApp:
                 tuple(self.theme['text_color'])
             )
             self.screen.blit(fps_text, (10, 10))
+        
+        # Draw fluid particles (before stick figure so it appears on top)
+        self.fluid_emitter.draw(self.screen)
         
         # Draw stick figure
         self.stick_figure.draw(self.screen)
