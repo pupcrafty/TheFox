@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """
-Main application class for the touch screen interface
 Particle blob app with four emitters controlled by Arduino sensors
 """
 
@@ -251,7 +250,7 @@ class Emitter:
         return (rx * sp, ry * sp)
 
 
-class TouchScreenApp:
+class ParticleBlobApp:
     """Main application class with particle blob and four emitters"""
     
     def __init__(self):
@@ -278,7 +277,7 @@ class TouchScreenApp:
                 (screen_width, screen_height)
             )
         
-        pygame.display.set_caption("Raspberry Pi Touch App")
+        pygame.display.set_caption("Particle Blob App")
         
         # Initialize clock for FPS control
         self.clock = pygame.time.Clock()
@@ -390,7 +389,7 @@ class TouchScreenApp:
         self.button_size = 60
         self.button_padding = 20
         
-        print("TouchScreenApp initialized successfully")
+        print("ParticleBlobApp initialized successfully")
     
     def _calculate_9_16_resolution(self):
         """Calculate resolution with 9:16 aspect ratio"""
@@ -1057,7 +1056,7 @@ class TouchScreenApp:
         
         # Draw title
         title_text = self.font_large.render(
-            "Raspberry Pi Touch App",
+            "Particle Blob App",
             True,
             tuple(self.theme['text_color'])
         )
@@ -1236,14 +1235,13 @@ class TouchScreenApp:
     
     def run(self):
         """Main application loop"""
-        print("Starting application...")
+        print("Starting ParticleBlobApp...")
         while self.running:
             self.handle_events()
             self.update()
             self.draw()
             self.clock.tick(self.fps)
         
-        # Cleanup
         self.cleanup()
     
     def cleanup(self):
@@ -1255,5 +1253,5 @@ class TouchScreenApp:
 
 
 if __name__ == "__main__":
-    app = TouchScreenApp()
+    app = ParticleBlobApp()
     app.run()

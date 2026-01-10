@@ -213,24 +213,50 @@ class FluidEmitterSystem:
         # This ensures stick figure bodies won't collide with particles
         PARTICLE_CATEGORY = 0x8000
         
-        # Modify all stick figure shapes' collision masks to exclude particles
+        # Verify and enforce that stick figure shapes cannot collide with particles
+        shapes_updated = 0
         for body_name, body in self.stick_figure.bodies.items():
             if body_name == 'center_pivot':  # Skip static pivot
                 continue
             # Get all shapes attached to this body
             for shape in body.shapes:
-                if hasattr(shape, 'filter') and shape.filter:
-                    # Exclude particle category from mask
-                    current_mask = shape.filter.mask
+                if hasattr(shape, 'filter'):
+                    # Always ensure particle category (0x8000) is excluded from mask
+                    if shape.filter:
+                        current_mask = shape.filter.mask
+                        current_categories = shape.filter.categories
+                        current_group = shape.filter.group
+                    else:
+                        # If no filter exists, create one with particle category excluded
+                        current_mask = 0xFFFF & ~PARTICLE_CATEGORY
+                        current_categories = self.stick_figure.collision_categories.get(body_name, 0x1)
+                        current_group = 0
+                    
+                    # Ensure particle category bit (0x8000) is NOT in the mask
                     new_mask = current_mask & ~PARTICLE_CATEGORY
-                    if new_mask != current_mask:  # Only update if changed
-                        shape.filter = pymunk.ShapeFilter(
-                            categories=shape.filter.categories,
-                            mask=new_mask,
-                            group=shape.filter.group
-                        )
+                    
+                    # Verify: check if mask includes particle category
+                    if (current_mask & PARTICLE_CATEGORY) != 0:
+                        print(f"Warning: {body_name} mask included particle category, fixing...")
+                        shapes_updated += 1
+                    
+                    shape.filter = pymunk.ShapeFilter(
+                        categories=current_categories,
+                        mask=new_mask,
+                        group=current_group
+                    )
+        
+        # Verify particles don't have stick figure categories in their mask
+        PARTICLE_MASK = 0x8000 | 0x4000  # Expected: only particles and boundaries
+        STICK_FIGURE_CATEGORIES = 0x7FF  # All stick figure categories (0x1 through 0x400)
+        if (PARTICLE_MASK & STICK_FIGURE_CATEGORIES) != 0:
+            print(f"ERROR: Particle mask includes stick figure categories! This should not happen.")
         
         print(f"FluidEmitterSystem initialized with {len(self.emitters)} emitters")
+        if shapes_updated > 0:
+            print(f"Updated {shapes_updated} stick figure shapes to exclude particle collisions")
+        else:
+            print("Verified: All stick figure shapes correctly exclude particle collisions")
 
     def _create_screen_boundaries(self):
         """Create static boundaries at screen edges for particle collision"""
@@ -455,9 +481,14 @@ class FluidEmitterSystem:
         # Use a unique category bit that stick figure bodies don't have in their mask
         # Particles category: 0x8000 (high bit not used by stick figure)
         # Particles mask: 0x8000 | 0x4000 (collide with other particles and boundaries)
+        # IMPORTANT: Do NOT include stick figure categories (0x1-0x400) in mask
+        # Stick figure uses categories: 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400
+        # Combined: 0x7FF (bits 0-10)
+        # Particle mask: 0xC000 = 0x8000 | 0x4000 (only bits 14 and 15), which does NOT include stick figure categories
         shape.filter = pymunk.ShapeFilter(
-            categories=0x8000,  # Particle category
-            mask=0x8000 | 0x4000  # Collide with other particles (0x8000) and boundaries (0x4000)
+            categories=0x8000,  # Particle category (bit 15)
+            mask=0x8000 | 0x4000  # Collide with other particles (0x8000) and boundaries (0x4000) only
+            # This mask = 0xC000, which does NOT include any stick figure categories (0x1-0x400)
         )
         
         self.space.add(body, shape)

@@ -7,8 +7,6 @@ Vector forces applied to upper arms and thighs (where sensors will be)
 
 import pygame
 import math
-import random
-import time
 import pymunk
 
 
@@ -19,7 +17,7 @@ class StickFigure:
     Forces are applied to upper arms and thighs based on sensor data.
     """
     
-    def __init__(self, x=0, y=0, scale=1.0, space=None):
+    def __init__(self, x=0, y=0, scale=1.0, space=None, config=None):
         """
         Initialize the stick figure with pymunk physics
         
@@ -28,6 +26,7 @@ class StickFigure:
             y: Y position of the figure's center
             scale: Scale factor for the entire figure
             space: pymunk.Space object (creates one if None)
+            config: Optional configuration dictionary for physics parameters
         """
         self.x = x
         self.y = y
@@ -124,17 +123,53 @@ class StickFigure:
         self.max_velocity = 400.0  # Maximum velocity before normalization (further reduced for stability)
         self.max_angular_velocity = 8.0  # Maximum angular velocity (radians per second) - further reduced
         
-        # Random force parameters (for testing, will be replaced by sensor data)
-        self.use_random_forces = True
-        self.random_force_strength = 150.0  # Further reduced to prevent excessive forces and instability
-        self.random_force_change_rate = 0.10  # Reduced for smoother changes
-        self.last_random_update = 0
-        self.random_update_interval = 50
+        # Particle drag parameters (forces from nearby fluid particles)
+        self.particle_drag_enabled = False  # Disabled by default - set to True to enable particle drag
+        self.particle_interaction_radius = 60.0  # Distance at which particles can drag limbs (reduced from 80)
+        self.particle_drag_strength = 120.0  # Strength of drag force from particles (reduced from 200)
+        self.min_particle_distance = 20.0  # Minimum distance to ignore particles (prevents feedback from self-emitted particles)
+        self.fluid_emitter = None  # Will be set by app to access particles
         
         # Rest pose parameters - prevents drooping by maintaining a natural upright pose
         self.maintain_rest_pose = True  # Enable/disable rest pose maintenance
         self.rest_pose_strength = 200.0  # Strength of restorative forces toward rest pose
         self.rest_angles = {}  # Will store target rest angles for each body
+        
+        # Balance normalization - treat head as suspension point (like puppet on wire)
+        self.apply_balance_forces = True  # Enable/disable balance forces
+        self.balance_strength = 2000.0  # Strength of balance normalization forces (increased for stability)
+        self.balance_torque_strength = 3000.0  # Strength of balance torque to keep upright (increased)
+        self.head_suspension_strength = 5000.0  # Strength to keep head at suspension point (like wire)
+        self.head_suspension_position = None  # Will be set to initial head position
+        
+        # Load physics configuration
+        self.config = config or {}
+        physics_config = self.config.get("physics", {})
+        display_config = self.config.get("display", {})
+        limbs_config = self.config.get("limbs", {})
+        
+        # New physics constraints - tilt and anti-flip
+        # Vertical angle is math.pi/2 (90 degrees = upright)
+        self.max_torso_tilt = math.radians(physics_config.get("max_torso_tilt", 45))  # ±45° from vertical
+        self.anti_flip_threshold = math.radians(physics_config.get("anti_flip_threshold", 85))  # ±85° from vertical
+        self.tilt_restore_strength = physics_config.get("tilt_restore_strength", 500)
+        self.anti_flip_strength = physics_config.get("anti_flip_strength", 1000)
+        
+        # Limb cross-prevention
+        self.limb_cross_threshold = limbs_config.get("cross_threshold", 30)
+        self.limb_corrective_force_strength = limbs_config.get("corrective_force_strength", 300)
+        self.limb_normalization_strength = limbs_config.get("normalization_strength", 100)
+        self.limb_normalization_threshold = limbs_config.get("normalization_threshold", 20)
+        
+        # Front/Back indicator
+        self.front_back_indicator_enabled = display_config.get("front_back_indicator_enabled", True)
+        self.front_back_indicator_color = tuple(display_config.get("front_back_indicator_color", [255, 255, 255]))
+        self.front_back_indicator_size = display_config.get("front_back_indicator_size", 24)
+        self.front_back_indicator_offset_y = display_config.get("front_back_indicator_offset_y", -10)
+        self.front_back_font = None  # Will be initialized when needed
+        
+        # Force manager (will be initialized after bodies are created)
+        self.force_manager = None
         
         # Build the physics structure
         self._build_physics_structure()
@@ -142,6 +177,98 @@ class StickFigure:
         # Set initial pose after all bodies are created
         # The _set_initial_pose will position and orient all bodies
         self._set_initial_pose()
+        
+        # Force torso to be exactly upright after all joints are created
+        # This ensures no drift from joint constraints
+        torso_body = self.bodies.get('torso')
+        if torso_body:
+            vertical_angle = math.pi / 2  # 90 degrees (vertical/upright)
+            torso_body.angle = vertical_angle
+            torso_body.angular_velocity = 0.0
+            torso_body.velocity = (0.0, 0.0)
+            torso_body.torque = 0.0
+            
+            # Also ensure head is aligned
+            head_body = self.bodies.get('head')
+            if head_body:
+                head_body.angle = vertical_angle
+                head_body.angular_velocity = 0.0
+                head_body.velocity = (0.0, 0.0)
+                head_body.torque = 0.0
+        
+        # Run a few settling physics steps to let the figure settle into upright position
+        # This helps overcome any initial joint tension or constraints
+        # Temporarily disable gravity during settling to prevent tilting
+        original_gravity = self.space.gravity
+        self.space.gravity = (0, 0)  # No gravity during settling
+        
+        for _ in range(20):  # Run 20 settling steps (more steps for better settling)
+            # Apply balance forces during settling to maintain upright position
+            if self.apply_balance_forces:
+                self._apply_balance_forces(0.001)  # Small dt for settling
+            
+            # Ensure torso stays upright during settling - strong enforcement
+            if torso_body:
+                current_angle = torso_body.angle
+                vertical_angle = math.pi / 2
+                angle_error = current_angle - vertical_angle
+                # Normalize error
+                while angle_error > math.pi:
+                    angle_error -= 2 * math.pi
+                while angle_error < -math.pi:
+                    angle_error += 2 * math.pi
+                
+                # If tilted at all, force back to vertical immediately
+                if abs(angle_error) > 0.001:  # More than ~0.06 degrees - very strict
+                    torso_body.angle = vertical_angle
+                    torso_body.angular_velocity = 0.0
+                    torso_body.torque = 0.0
+                
+                # Also ensure velocity is zero
+                if abs(torso_body.angular_velocity) > 0.001:
+                    torso_body.angular_velocity = 0.0
+            
+            # Step physics with very small dt
+            self.space.step(0.001)
+        
+        # Restore gravity after settling
+        self.space.gravity = original_gravity
+        
+        # Final enforcement - ensure everything is exactly upright after settling
+        if torso_body:
+            torso_body.angle = math.pi / 2
+            torso_body.angular_velocity = 0.0
+            torso_body.velocity = (0.0, 0.0)
+            torso_body.torque = 0.0
+            
+            # Double-check angle one more time and force if needed
+            angle_error = torso_body.angle - math.pi / 2
+            while angle_error > math.pi:
+                angle_error -= 2 * math.pi
+            while angle_error < -math.pi:
+                angle_error += 2 * math.pi
+            if abs(angle_error) > 0.001:
+                torso_body.angle = math.pi / 2
+                torso_body.angular_velocity = 0.0
+                torso_body.torque = 0.0
+        
+        # Initialize force manager after bodies are created and settled
+        try:
+            from .stick_figure_forces import ForceManager
+            self.force_manager = ForceManager(self, self.config)
+        except ImportError as e:
+            print(f"Warning: Could not import ForceManager: {e}")
+            self.force_manager = None
+        
+        # Initialize font for front/back indicator
+        if self.front_back_indicator_enabled:
+            try:
+                self.front_back_font = pygame.font.Font(None, self.front_back_indicator_size)
+            except:
+                try:
+                    self.front_back_font = pygame.font.SysFont('Arial', self.front_back_indicator_size)
+                except:
+                    self.front_back_font = pygame.font.Font(pygame.font.get_default_font(), self.front_back_indicator_size)
     
     def _build_physics_structure(self):
         """Build the physics bodies and joints for the stick figure"""
@@ -189,18 +316,23 @@ class StickFigure:
         torso_shape.density = 0.5
         # Torso can collide with all limbs but not head/thighs (directly connected)
         # No separate shoulders body now - triangle base IS the shoulders
+        # Disable all collisions between body parts - set mask to 0 (collide with nothing)
         torso_category = self.collision_categories['torso']
-        torso_mask = 0xFFFF & ~(self.collision_categories['head'] | 
-                                self.collision_categories['left_thigh'] | self.collision_categories['right_thigh'] |
-                                self.collision_categories['left_upper_arm'] | self.collision_categories['right_upper_arm'])
+        PARTICLE_CATEGORY = 0x8000
+        torso_mask = 0x0000  # No collisions with anything (including other body parts and particles)
         torso_shape.filter = pymunk.ShapeFilter(categories=torso_category, mask=torso_mask)
         self.space.add(torso_body, torso_shape)
         self.bodies['torso'] = torso_body
         torso_body.position = (self.x, torso_center_y)  # Torso center at pivot point
-        torso_body.angle = math.pi / 2  # Vertical (90 degrees)
+        
+        # Set torso to exactly vertical (upright) - 90 degrees = π/2
+        vertical_angle = math.pi / 2  # 90 degrees (vertical/upright)
+        torso_body.angle = vertical_angle
+        torso_body.angular_velocity = 0.0  # No initial rotation
+        torso_body.velocity = (0.0, 0.0)  # No initial velocity
         
         # Store initial angle and rotation limits for torso
-        self.torso_initial_angle = math.pi / 2  # 90 degrees (vertical)
+        self.torso_initial_angle = vertical_angle  # 90 degrees (vertical/upright)
         self.torso_max_rotation = math.radians(100)  # ±100 degrees from initial
         
         # Shoulder rotation limits (to prevent arms wrapping around body)
@@ -214,6 +346,12 @@ class StickFigure:
         self.space.add(pivot_joint)
         self.joints['torso_pivot'] = pivot_joint
         
+        # IMPORTANT: Ensure torso is exactly vertical RIGHT AFTER joint creation
+        # Do this immediately to prevent any drift
+        torso_body.angle = vertical_angle
+        torso_body.angular_velocity = 0.0
+        torso_body.velocity = (0.0, 0.0)
+        
         # Head (circle body at top) - positioned above torso
         # Lighter head mass to reduce gravitational pull
         head_mass = self.mass * 0.3  # Reduced from 0.5 to 0.3 for stability
@@ -224,10 +362,10 @@ class StickFigure:
         head_shape = pymunk.Circle(head_body, head_collision_radius)
         head_shape.friction = 0.7
         head_shape.density = 0.5
-        # Head can collide with all limbs but not torso (directly connected)
-        # No separate shoulders - triangle base is the shoulders
+        # Disable all collisions between body parts - set mask to 0 (collide with nothing)
         head_category = self.collision_categories['head']
-        head_mask = 0xFFFF & ~(self.collision_categories['torso'])
+        PARTICLE_CATEGORY = 0x8000
+        head_mask = 0x0000  # No collisions with anything (including other body parts and particles)
         head_shape.filter = pymunk.ShapeFilter(categories=head_category, mask=head_mask)
         self.space.add(head_body, head_shape)
         self.bodies['head'] = head_body
@@ -235,7 +373,11 @@ class StickFigure:
         # Position head above torso, touching it
         head_y = torso_center_y - scaled_torso/2 - scaled_head_radius
         head_body.position = (self.x, head_y)
-        head_body.angle = 0
+        # Head should be aligned with torso (upright) - same as torso angle
+        vertical_angle = math.pi / 2  # 90 degrees (vertical/upright)
+        head_body.angle = vertical_angle
+        head_body.angular_velocity = 0.0  # No initial rotation
+        head_body.velocity = (0.0, 0.0)  # No initial velocity
         
         # Connect head to torso - RIGID attachment (no leaning, fixed to torso)
         # Head attaches at bottom of head circle, torso attaches at top center (middle of shoulder base)
@@ -420,36 +562,12 @@ class StickFigure:
         shape.friction = 0.7  # Increased friction for better stability
         shape.density = 0.5  # Set density for collision response
         
-        # Set up collision filtering: limbs can collide with each other but not with directly connected parts
+        # Disable all collisions between body parts - set mask to 0 (collide with nothing)
         category = self.collision_categories.get(name, 0x1)
         
-        # Determine what this limb should NOT collide with (directly connected parts)
-        excluded_categories = 0
-        if name == 'left_upper_arm':
-            # Upper arms attach to torso triangle base (shoulders), so exclude torso and forearm
-            excluded_categories = (self.collision_categories['torso'] | 
-                                  self.collision_categories['left_forearm'])
-        elif name == 'right_upper_arm':
-            # Upper arms attach to torso triangle base (shoulders), so exclude torso and forearm
-            excluded_categories = (self.collision_categories['torso'] | 
-                                  self.collision_categories['right_forearm'])
-        elif name == 'left_forearm':
-            excluded_categories = self.collision_categories['left_upper_arm']
-        elif name == 'right_forearm':
-            excluded_categories = self.collision_categories['right_upper_arm']
-        elif name == 'left_thigh':
-            excluded_categories = (self.collision_categories['torso'] | 
-                                  self.collision_categories['left_shin'])
-        elif name == 'right_thigh':
-            excluded_categories = (self.collision_categories['torso'] | 
-                                  self.collision_categories['right_shin'])
-        elif name == 'left_shin':
-            excluded_categories = self.collision_categories['left_thigh']
-        elif name == 'right_shin':
-            excluded_categories = self.collision_categories['right_thigh']
-        
-        # Can collide with everything except directly connected parts and itself
-        mask = 0xFFFF & ~excluded_categories & ~category
+        # Set mask to 0 to disable all collisions (including with other body parts and particles)
+        PARTICLE_CATEGORY = 0x8000
+        mask = 0x0000  # No collisions with anything
         
         shape.filter = pymunk.ShapeFilter(categories=category, mask=mask)
         self.space.add(body, shape)
@@ -1108,16 +1226,171 @@ class StickFigure:
                 stability_force_y = max(-max_stability_force, min(max_stability_force, stability_force_y))
                 body.apply_force_at_local_point((stability_force_x, stability_force_y), (0, 0))
     
+    def _apply_balance_forces(self, dt):
+        """
+        Apply balance normalization forces - treat head as suspension point (like puppet on wire)
+        Body naturally balances from the head in a standing position
+        """
+        head_body = self.bodies.get('head')
+        torso_body = self.bodies.get('torso')
+        
+        if not head_body or not torso_body:
+            return
+        
+        try:
+            # Head acts as suspension point (like attached to wire)
+            # Keep head at fixed suspension position (like wire attachment point)
+            if self.head_suspension_position is not None:
+                head_pos = head_body.position
+                current_head_x = float(head_pos.x) if hasattr(head_pos, 'x') else float(head_pos[0])
+                current_head_y = float(head_pos.y) if hasattr(head_pos, 'y') else float(head_pos[1])
+                
+                target_head_x, target_head_y = self.head_suspension_position
+                
+                # Calculate offset from suspension point
+                dx_head = current_head_x - target_head_x
+                dy_head = current_head_y - target_head_y
+                distance_head = math.sqrt(dx_head * dx_head + dy_head * dy_head)
+                
+                # Apply strong restoring force to keep head at suspension point (like wire)
+                if distance_head > 0.5:  # Only apply if head has drifted
+                    restore_head_x = -dx_head * self.head_suspension_strength
+                    restore_head_y = -dy_head * self.head_suspension_strength
+                    
+                    # Clamp forces
+                    max_head_force = 20000.0
+                    restore_head_x = max(-max_head_force, min(max_head_force, restore_head_x))
+                    restore_head_y = max(-max_head_force, min(max_head_force, restore_head_y))
+                    
+                    head_body.apply_force_at_local_point((restore_head_x, restore_head_y), (0, 0))
+                    
+                    # If drift is too large, snap back (hard constraint)
+                    if distance_head > 5.0:
+                        head_body.position = (target_head_x, target_head_y)
+                        head_body.velocity = (0.0, 0.0)
+            
+            # Use head position as the pivot/suspension point for balance calculations
+            head_pos = head_body.position
+            head_x = float(head_pos.x) if hasattr(head_pos, 'x') else float(head_pos[0])
+            head_y = float(head_pos.y) if hasattr(head_pos, 'y') else float(head_pos[1])
+            
+            # For torso: apply balance forces to keep it upright and balanced under head
+            # Torso should hang/balance from head attachment point
+            
+            # 1. Horizontal balance: Keep torso center of mass aligned under head
+            torso_pos = torso_body.position
+            torso_x = float(torso_pos.x) if hasattr(torso_pos, 'x') else float(torso_pos[0])
+            
+            # Calculate horizontal offset from head
+            horizontal_offset = torso_x - head_x
+            
+            # Apply horizontal restoring force to align torso under head (balanced)
+            # Make this stronger and apply even for small offsets to keep balanced
+            if abs(horizontal_offset) > 0.5:  # Lower threshold for more responsive balancing
+                balance_force_x = -horizontal_offset * self.balance_strength
+                # Clamp force but allow higher values
+                max_balance_force = 20000.0
+                balance_force_x = max(-max_balance_force, min(max_balance_force, balance_force_x))
+                torso_body.apply_force_at_local_point((balance_force_x, 0), (0, 0))
+            
+            # 2. Rotational balance: Keep torso upright (vertical) - balanced standing position
+            # Torso should be vertical (90 degrees = π/2) for balanced standing
+            vertical_angle = math.pi / 2  # 90 degrees = upright/vertical
+            current_torso_angle = torso_body.angle
+            
+            # Calculate angle difference from vertical (upright)
+            angle_from_vertical = current_torso_angle - vertical_angle
+            
+            # Normalize to [-π, π]
+            while angle_from_vertical > math.pi:
+                angle_from_vertical -= 2 * math.pi
+            while angle_from_vertical < -math.pi:
+                angle_from_vertical += 2 * math.pi
+            
+            # Apply restoring torque to keep torso upright (balanced standing)
+            # Apply even for small tilts to maintain upright position
+            if abs(angle_from_vertical) > 0.02:  # ~1 degree threshold for more responsive balancing
+                # Torque proportional to tilt - stronger for larger tilts
+                balance_torque = -angle_from_vertical * self.balance_torque_strength
+                
+                # Scale torque based on how far from vertical (stronger correction for larger tilts)
+                # Add extra strength multiplier for immediate response
+                torque_scale = 1.0 + abs(angle_from_vertical) * 2.0  # Increased from 0.5 to 2.0
+                balance_torque *= torque_scale
+                
+                # Clamp torque but allow higher values
+                max_balance_torque = 100000.0
+                balance_torque = max(-max_balance_torque, min(max_balance_torque, balance_torque))
+                
+                torso_body.torque += balance_torque
+                
+                # Also dampen angular velocity when applying balance torque
+                if abs(torso_body.angular_velocity) > 0.5:  # If rotating too fast
+                    torso_body.angular_velocity *= 0.7  # Dampen rotation
+            
+            # 3. Apply gentle balancing forces to limbs to help maintain balance
+            # Limbs should naturally hang/balance from their joints
+            
+            # For limbs: apply subtle forces to help them balance naturally
+            # This helps them settle into a balanced position
+            limb_bodies = ['left_upper_arm', 'right_upper_arm', 'left_forearm', 'right_forearm',
+                          'left_thigh', 'right_thigh', 'left_shin', 'right_shin']
+            
+            for limb_name in limb_bodies:
+                limb_body = self.bodies.get(limb_name)
+                if not limb_body:
+                    continue
+                
+                # Get rest angle for this limb (target balanced position)
+                rest_angle = self.rest_angles.get(limb_name)
+                if rest_angle is None:
+                    continue
+                
+                # Calculate angular difference from rest angle
+                current_angle = limb_body.angle
+                angle_diff = current_angle - rest_angle
+                
+                # Normalize to [-π, π]
+                while angle_diff > math.pi:
+                    angle_diff -= 2 * math.pi
+                while angle_diff < -math.pi:
+                    angle_diff += 2 * math.pi
+                
+                # Apply gentle restoring torque toward rest angle (balanced position)
+                # Only apply if significantly off from rest position
+                if abs(angle_diff) > 0.1:  # ~6 degrees threshold
+                    # Gentle balance torque (weaker than torso, limbs have more freedom)
+                    limb_balance_torque = -angle_diff * self.balance_torque_strength * 0.3  # 30% of torso strength
+                    
+                    # Clamp torque
+                    max_limb_torque = 15000.0
+                    limb_balance_torque = max(-max_limb_torque, min(max_limb_torque, limb_balance_torque))
+                    
+                    limb_body.torque += limb_balance_torque
+                    
+        except (AttributeError, TypeError, ValueError, OverflowError) as e:
+            pass  # Skip if calculation fails
+    
     def _set_initial_pose(self):
         """Set initial pose - positions should already be set, just ensure angles are correct"""
         # Bodies should already be positioned correctly during construction
-        # Just ensure angles are set for a natural pose
+        # Just ensure angles are set for a natural upright pose
         
         # Store rest angles for rest pose maintenance (upright, natural pose)
-        # Torso: vertical (90 degrees)
-        # Head: same as torso (rigidly attached, no independent angle)
-        self.rest_angles['torso'] = math.pi / 2  # 90 degrees (vertical)
-        self.rest_angles['head'] = math.pi / 2  # Head matches torso angle (rigid attachment)
+        # Torso: vertical (90 degrees = upright)
+        vertical_angle = math.pi / 2  # 90 degrees (vertical/upright)
+        self.rest_angles['torso'] = vertical_angle
+        self.rest_angles['head'] = vertical_angle  # Head matches torso angle (rigid attachment)
+        
+        # Store head suspension position (like wire attachment point) for balance forces
+        # This will be the fixed point the figure hangs from (like a puppet on a wire)
+        head_body = self.bodies.get('head')
+        if head_body:
+            head_pos = head_body.position
+            self.head_suspension_position = (
+                float(head_pos.x) if hasattr(head_pos, 'x') else float(head_pos[0]),
+                float(head_pos.y) if hasattr(head_pos, 'y') else float(head_pos[1])
+            )
         
         # Arms: slightly outward and down (more upright than drooping)
         self.rest_angles['left_upper_arm'] = math.radians(120)  # More outward, less drooped
@@ -1131,40 +1404,88 @@ class StickFigure:
         self.rest_angles['left_shin'] = math.radians(95)  # Continue from thigh
         self.rest_angles['right_shin'] = math.radians(85)  # Continue from thigh
         
-        # Apply initial angles
+        # Ensure torso is exactly vertical (upright) - enforce strongly
+        torso_body = self.bodies.get('torso')
+        if torso_body:
+            # Force torso to exactly vertical angle
+            torso_body.angle = vertical_angle
+            torso_body.angular_velocity = 0.0  # No initial rotation
+            torso_body.velocity = (0.0, 0.0)  # No initial velocity
+            torso_body.torque = 0.0  # Clear any accumulated torque
+            
+            # Double-check and enforce again (sometimes physics can drift immediately)
+            # Read current angle and force correction if needed
+            current_angle = torso_body.angle
+            angle_error = current_angle - vertical_angle
+            # Normalize error to [-π, π]
+            while angle_error > math.pi:
+                angle_error -= 2 * math.pi
+            while angle_error < -math.pi:
+                angle_error += 2 * math.pi
+            
+            # If there's any error, force correction
+            if abs(angle_error) > 0.001:  # More than ~0.06 degrees
+                torso_body.angle = vertical_angle  # Force to exact vertical
+                torso_body.angular_velocity = 0.0
+                torso_body.torque = 0.0
+        
+        # Ensure head is aligned with torso (upright)
+        head_body = self.bodies.get('head')
+        if head_body:
+            head_body.angle = vertical_angle
+            head_body.angular_velocity = 0.0
+            head_body.velocity = (0.0, 0.0)
+        
+        # Apply initial angles to all limbs and reset velocities
         left_arm_body = self.bodies.get('left_upper_arm')
         if left_arm_body:
             left_arm_body.angle = self.rest_angles['left_upper_arm']
+            left_arm_body.angular_velocity = 0.0
+            left_arm_body.velocity = (0.0, 0.0)
         
         right_arm_body = self.bodies.get('right_upper_arm')
         if right_arm_body:
             right_arm_body.angle = self.rest_angles['right_upper_arm']
+            right_arm_body.angular_velocity = 0.0
+            right_arm_body.velocity = (0.0, 0.0)
         
         # Forearms extend from upper arms
         left_forearm_body = self.bodies.get('left_forearm')
         if left_forearm_body:
             left_forearm_body.angle = self.rest_angles['left_forearm']
+            left_forearm_body.angular_velocity = 0.0
+            left_forearm_body.velocity = (0.0, 0.0)
         
         right_forearm_body = self.bodies.get('right_forearm')
         if right_forearm_body:
             right_forearm_body.angle = self.rest_angles['right_forearm']
+            right_forearm_body.angular_velocity = 0.0
+            right_forearm_body.velocity = (0.0, 0.0)
         
-        # Legs already positioned, angles already set during construction
+        # Legs: set angles and reset velocities
         left_thigh_body = self.bodies.get('left_thigh')
         if left_thigh_body:
             left_thigh_body.angle = self.rest_angles['left_thigh']
+            left_thigh_body.angular_velocity = 0.0
+            left_thigh_body.velocity = (0.0, 0.0)
         
         right_thigh_body = self.bodies.get('right_thigh')
         if right_thigh_body:
             right_thigh_body.angle = self.rest_angles['right_thigh']
+            right_thigh_body.angular_velocity = 0.0
+            right_thigh_body.velocity = (0.0, 0.0)
         
         left_shin_body = self.bodies.get('left_shin')
         if left_shin_body:
             left_shin_body.angle = self.rest_angles['left_shin']
+            left_shin_body.angular_velocity = 0.0
+            left_shin_body.velocity = (0.0, 0.0)
         
         right_shin_body = self.bodies.get('right_shin')
         if right_shin_body:
             right_shin_body.angle = self.rest_angles['right_shin']
+            right_shin_body.angular_velocity = 0.0
+            right_shin_body.velocity = (0.0, 0.0)
     
     def _apply_scale(self, value):
         """Apply scale to a value"""
@@ -1235,40 +1556,179 @@ class StickFigure:
         
         self.set_force(limb, (fx, fy, torque))
     
-    def _generate_random_forces(self):
-        """Generate random target forces for testing"""
-        current_time = time.time() * 1000
+    def set_fluid_emitter(self, fluid_emitter):
+        """Set the fluid emitter system to access particles for drag forces"""
+        self.fluid_emitter = fluid_emitter
+    
+    def _apply_particle_drag_forces(self, dt):
+        """
+        Apply drag forces to limbs from nearby fluid particles (vector balls)
+        Only applies forces when particles are visible/within interaction radius
+        """
+        if self.fluid_emitter is None or not hasattr(self.fluid_emitter, 'particles'):
+            # No fluid emitter, reset all forces to zero immediately
+            self.left_upper_arm_target_force = (0.0, 0.0, 0.0)
+            self.right_upper_arm_target_force = (0.0, 0.0, 0.0)
+            self.left_upper_leg_target_force = (0.0, 0.0, 0.0)
+            self.right_upper_leg_target_force = (0.0, 0.0, 0.0)
+            return
         
-        if current_time - self.last_random_update > self.random_update_interval:
-            if random.random() < self.random_force_change_rate:
-                self.left_upper_arm_target_force = (
-                    random.uniform(-self.random_force_strength, self.random_force_strength),
-                    random.uniform(-self.random_force_strength, self.random_force_strength),
-                    random.uniform(-self.random_force_strength * 0.3, self.random_force_strength * 0.3)
-                )
+        # Reset target forces to zero (will accumulate from nearby particles)
+        self.left_upper_arm_target_force = (0.0, 0.0, 0.0)
+        self.right_upper_arm_target_force = (0.0, 0.0, 0.0)
+        self.left_upper_leg_target_force = (0.0, 0.0, 0.0)
+        self.right_upper_leg_target_force = (0.0, 0.0, 0.0)
+        
+        # Get particle positions - check if fluid_emitter exists and has particles
+        if self.fluid_emitter is None:
+            # No fluid emitter at all, forces already reset to zero above
+            return
             
-            if random.random() < self.random_force_change_rate:
-                self.right_upper_arm_target_force = (
-                    random.uniform(-self.random_force_strength, self.random_force_strength),
-                    random.uniform(-self.random_force_strength, self.random_force_strength),
-                    random.uniform(-self.random_force_strength * 0.3, self.random_force_strength * 0.3)
-                )
+        if not hasattr(self.fluid_emitter, 'particles'):
+            # Fluid emitter doesn't have particles attribute, forces already reset to zero above
+            return
             
-            if random.random() < self.random_force_change_rate:
-                self.left_upper_leg_target_force = (
-                    random.uniform(-self.random_force_strength, self.random_force_strength),
-                    random.uniform(-self.random_force_strength, self.random_force_strength),
-                    random.uniform(-self.random_force_strength * 0.3, self.random_force_strength * 0.3)
-                )
+        particles = self.fluid_emitter.particles
+        if particles is None or len(particles) == 0:
+            # No particles, forces already reset to zero above - this is correct, just return
+            return
+        
+        # Calculate forces for each limb from nearby particles
+        limb_bodies = {
+            'left_upper_arm': self.bodies.get('left_upper_arm'),
+            'right_upper_arm': self.bodies.get('right_upper_arm'),
+            'left_thigh': self.bodies.get('left_thigh'),
+            'right_thigh': self.bodies.get('right_thigh')
+        }
+        
+        limb_target_forces = {
+            'left_upper_arm': [0.0, 0.0, 0.0],
+            'right_upper_arm': [0.0, 0.0, 0.0],
+            'left_thigh': [0.0, 0.0, 0.0],
+            'right_thigh': [0.0, 0.0, 0.0]
+        }
+        
+        # For each limb, find nearby particles and calculate drag forces
+        # Use only the nearest particles to prevent overwhelming forces from many particles
+        max_particles_per_limb = 5  # Only consider the nearest N particles per limb
+        
+        for limb_name, limb_body in limb_bodies.items():
+            if limb_body is None:
+                continue
             
-            if random.random() < self.random_force_change_rate:
-                self.right_upper_leg_target_force = (
-                    random.uniform(-self.random_force_strength, self.random_force_strength),
-                    random.uniform(-self.random_force_strength, self.random_force_strength),
-                    random.uniform(-self.random_force_strength * 0.3, self.random_force_strength * 0.3)
-                )
+            limb_pos = limb_body.position
+            lx = float(limb_pos.x) if hasattr(limb_pos, 'x') else float(limb_pos[0])
+            ly = float(limb_pos.y) if hasattr(limb_pos, 'y') else float(limb_pos[1])
             
-            self.last_random_update = current_time
+            # Collect nearby particles with their distances
+            nearby_particles = []
+            for particle in particles:
+                particle_body = particle.get('body')
+                if particle_body is None:
+                    continue
+                
+                particle_pos = particle_body.position
+                px = float(particle_pos.x) if hasattr(particle_pos, 'x') else float(particle_pos[0])
+                py = float(particle_pos.y) if hasattr(particle_pos, 'y') else float(particle_pos[1])
+                
+                # Calculate distance
+                dx = px - lx
+                dy = py - ly
+                distance = math.sqrt(dx * dx + dy * dy)
+                
+                # Ignore particles that are too close (likely just emitted from this limb)
+                # Only consider particles within interaction radius and not too close
+                if (distance >= self.min_particle_distance and 
+                    distance < self.particle_interaction_radius and 
+                    distance > 1e-6):
+                    nearby_particles.append((distance, dx, dy, particle))
+            
+            # Sort by distance and take only the nearest particles
+            nearby_particles.sort(key=lambda x: x[0])
+            nearby_particles = nearby_particles[:max_particles_per_limb]
+            
+            # Calculate forces from the nearest particles
+            total_fx = 0.0
+            total_fy = 0.0
+            total_torque = 0.0
+            particle_count = 0
+            
+            for distance, dx, dy, particle in nearby_particles:
+                # Normalize direction from limb to particle
+                nx = dx / distance
+                ny = dy / distance
+                
+                # Calculate force strength (stronger when closer, falls off with distance)
+                normalized_dist = distance / self.particle_interaction_radius
+                # Strength peaks at close range and falls off linearly
+                force_strength = self.particle_drag_strength * (1.0 - normalized_dist)
+                
+                # Apply force in direction from limb toward particle (drag the limb)
+                fx = nx * force_strength
+                fy = ny * force_strength
+                
+                total_fx += fx
+                total_fy += fy
+                particle_count += 1
+                
+                # Apply slight torque based on particle position relative to limb center
+                torque_strength = force_strength * 0.08  # Reduced torque for stability
+                limb_angle = limb_body.angle
+                particle_angle = math.atan2(dy, dx)
+                angle_diff = particle_angle - limb_angle
+                # Normalize angle difference to [-pi, pi]
+                while angle_diff > math.pi:
+                    angle_diff -= 2 * math.pi
+                while angle_diff < -math.pi:
+                    angle_diff += 2 * math.pi
+                torque = angle_diff * torque_strength
+                total_torque += torque
+            
+            # Only set forces if particles were actually found nearby
+            # If particle_count is 0, leave it at [0,0,0] (which we initialized)
+            if particle_count > 0:
+                # Use accumulated forces (already initialized to 0.0 above if no particles)
+                limb_target_forces[limb_name][0] = total_fx
+                limb_target_forces[limb_name][1] = total_fy
+                limb_target_forces[limb_name][2] = total_torque
+            # else: forces remain at [0, 0, 0] which is correct
+        
+        # Clamp accumulated forces to prevent excessive values
+        # Also limit how many particles can contribute to prevent overwhelming forces
+        max_force = 400.0  # Reduced from 1000.0 to prevent excessive flailing
+        max_torque = 150.0  # Reduced from 300.0
+        
+        # Only update target forces if there are actually forces to apply
+        # If all forces are zero (no particles nearby), explicitly ensure targets are zero
+        for limb_name in limb_target_forces:
+            fx, fy, torque = limb_target_forces[limb_name]
+            
+            # Check if forces are effectively zero (within rounding error)
+            force_magnitude = math.sqrt(fx * fx + fy * fy + abs(torque) * abs(torque))
+            
+            if force_magnitude < 0.1:  # Effectively zero
+                # Explicitly set to zero to prevent any accumulation errors
+                fx, fy, torque = 0.0, 0.0, 0.0
+            else:
+                # Clamp linear forces
+                linear_force_mag = math.sqrt(fx * fx + fy * fy)
+                if linear_force_mag > max_force:
+                    scale = max_force / linear_force_mag
+                    fx *= scale
+                    fy *= scale
+                
+                # Clamp torque
+                torque = max(-max_torque, min(max_torque, torque))
+            
+            # Set target forces (will be zero if no particles nearby)
+            if limb_name == 'left_upper_arm':
+                self.left_upper_arm_target_force = (float(fx), float(fy), float(torque))
+            elif limb_name == 'right_upper_arm':
+                self.right_upper_arm_target_force = (float(fx), float(fy), float(torque))
+            elif limb_name == 'left_thigh':
+                self.left_upper_leg_target_force = (float(fx), float(fy), float(torque))
+            elif limb_name == 'right_thigh':
+                self.right_upper_leg_target_force = (float(fx), float(fy), float(torque))
     
     def _lerp_tuple(self, a, b, t):
         """Linear interpolation between two tuples"""
@@ -1276,28 +1736,73 @@ class StickFigure:
     
     def _smooth_forces(self, dt):
         """Smoothly interpolate current forces toward target forces"""
-        interp_factor = 1.0 - math.exp(-self.force_interpolation_speed * dt)
+        # If target forces are zero, immediately snap to zero or decay very fast
+        # Check if target forces are effectively zero
+        target_magnitude_arm_left = math.sqrt(
+            self.left_upper_arm_target_force[0]**2 + 
+            self.left_upper_arm_target_force[1]**2 + 
+            abs(self.left_upper_arm_target_force[2])**2
+        )
+        target_magnitude_arm_right = math.sqrt(
+            self.right_upper_arm_target_force[0]**2 + 
+            self.right_upper_arm_target_force[1]**2 + 
+            abs(self.right_upper_arm_target_force[2])**2
+        )
+        target_magnitude_leg_left = math.sqrt(
+            self.left_upper_leg_target_force[0]**2 + 
+            self.left_upper_leg_target_force[1]**2 + 
+            abs(self.left_upper_leg_target_force[2])**2
+        )
+        target_magnitude_leg_right = math.sqrt(
+            self.right_upper_leg_target_force[0]**2 + 
+            self.right_upper_leg_target_force[1]**2 + 
+            abs(self.right_upper_leg_target_force[2])**2
+        )
         
-        self.left_upper_arm_force = self._lerp_tuple(
-            self.left_upper_arm_force,
-            self.left_upper_arm_target_force,
-            interp_factor
-        )
-        self.right_upper_arm_force = self._lerp_tuple(
-            self.right_upper_arm_force,
-            self.right_upper_arm_target_force,
-            interp_factor
-        )
-        self.left_upper_leg_force = self._lerp_tuple(
-            self.left_upper_leg_force,
-            self.left_upper_leg_target_force,
-            interp_factor
-        )
-        self.right_upper_leg_force = self._lerp_tuple(
-            self.right_upper_leg_force,
-            self.right_upper_leg_target_force,
-            interp_factor
-        )
+        # If target is effectively zero, immediately snap to zero (no interpolation)
+        # This ensures forces are truly zero when no particles are nearby
+        threshold = 0.1  # Consider forces below this as zero
+        
+        if target_magnitude_arm_left < threshold:
+            self.left_upper_arm_force = (0.0, 0.0, 0.0)
+        else:
+            # Use normal interpolation when there are actual forces
+            interp_factor = 1.0 - math.exp(-self.force_interpolation_speed * dt)
+            self.left_upper_arm_force = self._lerp_tuple(
+                self.left_upper_arm_force,
+                self.left_upper_arm_target_force,
+                interp_factor
+            )
+        
+        if target_magnitude_arm_right < threshold:
+            self.right_upper_arm_force = (0.0, 0.0, 0.0)
+        else:
+            interp_factor = 1.0 - math.exp(-self.force_interpolation_speed * dt)
+            self.right_upper_arm_force = self._lerp_tuple(
+                self.right_upper_arm_force,
+                self.right_upper_arm_target_force,
+                interp_factor
+            )
+        
+        if target_magnitude_leg_left < threshold:
+            self.left_upper_leg_force = (0.0, 0.0, 0.0)
+        else:
+            interp_factor = 1.0 - math.exp(-self.force_interpolation_speed * dt)
+            self.left_upper_leg_force = self._lerp_tuple(
+                self.left_upper_leg_force,
+                self.left_upper_leg_target_force,
+                interp_factor
+            )
+        
+        if target_magnitude_leg_right < threshold:
+            self.right_upper_leg_force = (0.0, 0.0, 0.0)
+        else:
+            interp_factor = 1.0 - math.exp(-self.force_interpolation_speed * dt)
+            self.right_upper_leg_force = self._lerp_tuple(
+                self.right_upper_leg_force,
+                self.right_upper_leg_target_force,
+                interp_factor
+            )
     
     def update(self, dt):
         """
@@ -1309,9 +1814,16 @@ class StickFigure:
         # Update gravity to match parameter (allows dynamic adjustment)
         self.space.gravity = (0, self.gravity_strength)
         
-        # Generate random forces if enabled
-        if self.use_random_forces:
-            self._generate_random_forces()
+        # Apply particle drag forces if enabled and particles are available
+        # Always call _apply_particle_drag_forces when enabled to ensure forces are reset to zero if no particles
+        if self.particle_drag_enabled:
+            self._apply_particle_drag_forces(dt)
+        else:
+            # If particle drag is disabled, explicitly zero all target forces
+            self.left_upper_arm_target_force = (0.0, 0.0, 0.0)
+            self.right_upper_arm_target_force = (0.0, 0.0, 0.0)
+            self.left_upper_leg_target_force = (0.0, 0.0, 0.0)
+            self.right_upper_leg_target_force = (0.0, 0.0, 0.0)
         
         # Smoothly interpolate forces toward targets
         self._smooth_forces(dt)
@@ -1357,11 +1869,29 @@ class StickFigure:
         if self.apply_normalizing_forces:
             self._apply_normalizing_forces(dt)
         
-        # Enforce rotation limits on torso BEFORE physics step (max ±100 degrees)
-        self._enforce_torso_rotation_limit()
+        # Update force manager (applies forces from sequences and continuous forces)
+        if self.force_manager:
+            # Pass current time (simple time tracking)
+            if not hasattr(self, '_force_manager_time'):
+                self._force_manager_time = 0.0
+            self._force_manager_time += dt
+            self.force_manager.update(dt, self._force_manager_time)
+        
+        # Apply new tilt and anti-flip constraints BEFORE physics step
+        self._apply_tilt_constraints()
+        
+        # Keep old rotation limit as backup (can be removed later if new constraints work well)
+        # self._enforce_torso_rotation_limit()
         
         # Keep head rigidly attached to torso (match angle every frame)
         self._enforce_rigid_head_attachment()
+        
+        # Check for limb crossing and apply corrective forces BEFORE physics step
+        self._check_limb_crossing()
+        
+        # Apply balance normalization forces (head as suspension point, body balances from it)
+        if self.apply_balance_forces:
+            self._apply_balance_forces(dt)
         
         # Maintain rest pose to prevent drooping (apply before damping)
         if self.maintain_rest_pose:
@@ -1373,8 +1903,12 @@ class StickFigure:
         # Step the physics simulation
         self.space.step(dt)
         
-        # Enforce rotation limits AGAIN AFTER physics step to catch any overshoot
-        self._enforce_torso_rotation_limit()
+        # Apply constraints AGAIN AFTER physics step to catch any overshoot
+        self._apply_tilt_constraints()
+        self._check_limb_crossing()
+        
+        # Keep old rotation limit as backup (can be removed later)
+        # self._enforce_torso_rotation_limit()
         
         # Enforce shoulder rotation limits to prevent arms wrapping around body
         self._enforce_shoulder_rotation_limits()
@@ -1598,6 +2132,11 @@ class StickFigure:
                 pygame.draw.polygon(surface, self.color, world_vertices)
                 # Draw triangle outline
                 pygame.draw.polygon(surface, self.color, world_vertices, visual_thickness // 2)
+                
+                # Draw front/back indicator on torso
+                if self.front_back_indicator_enabled and self.front_back_font:
+                    self._draw_front_back_indicator(surface, torso_body)
+                    
             except (AttributeError, TypeError, ValueError) as e:
                 # Fallback to line drawing if triangle calculation fails
                 pygame.draw.line(surface, self.color,
@@ -1610,6 +2149,12 @@ class StickFigure:
                             positions.get('neck', (self.x, self.y)),
                             positions.get('waist', (self.x, self.y + self._apply_scale(self.torso_length))),
                             visual_thickness)
+            
+            # Try to draw front/back indicator even if torso body not available
+            if self.front_back_indicator_enabled and self.front_back_font:
+                torso_body = self.bodies.get('torso')
+                if torso_body:
+                    self._draw_front_back_indicator(surface, torso_body)
         
         # No separate shoulder line - triangle base IS the shoulders
         # Draw left arm (upper arm + forearm) with thickness
@@ -1652,7 +2197,30 @@ class StickFigure:
                         positions['right_ankle'],
                         visual_thickness)
         
-        # Draw acceleration visualizations if enabled
+        # Always draw numerical force values for input sites
+        left_upper_arm_mid = (
+            (positions['left_shoulder'][0] + positions['left_elbow'][0]) / 2,
+            (positions['left_shoulder'][1] + positions['left_elbow'][1]) / 2
+        )
+        right_upper_arm_mid = (
+            (positions['right_shoulder'][0] + positions['right_elbow'][0]) / 2,
+            (positions['right_shoulder'][1] + positions['right_elbow'][1]) / 2
+        )
+        left_upper_leg_mid = (
+            (positions['left_hip'][0] + positions['left_knee'][0]) / 2,
+            (positions['left_hip'][1] + positions['left_knee'][1]) / 2
+        )
+        right_upper_leg_mid = (
+            (positions['right_hip'][0] + positions['right_knee'][0]) / 2,
+            (positions['right_hip'][1] + positions['right_knee'][1]) / 2
+        )
+        
+        self._draw_force_values(surface, left_upper_arm_mid, self.left_upper_arm_force, "L Arm")
+        self._draw_force_values(surface, right_upper_arm_mid, self.right_upper_arm_force, "R Arm")
+        self._draw_force_values(surface, left_upper_leg_mid, self.left_upper_leg_force, "L Leg")
+        self._draw_force_values(surface, right_upper_leg_mid, self.right_upper_leg_force, "R Leg")
+        
+        # Draw acceleration visualizations if enabled (arrows and circles)
         if self.show_accelerations:
             self._draw_accelerations(surface, positions)
         
@@ -1680,7 +2248,7 @@ class StickFigure:
             (positions['right_hip'][1] + positions['right_knee'][1]) / 2
         )
         
-        # Draw circles and arrows for each force point
+        # Draw circles and arrows for each force point (visualization only, not the numerical values)
         # Convert forces to acceleration-like visualization
         self._draw_force_point(surface, left_upper_arm_mid, self.left_upper_arm_force)
         self._draw_force_point(surface, right_upper_arm_mid, self.right_upper_arm_force)
@@ -1703,7 +2271,7 @@ class StickFigure:
         
         # Scale arrow length
         base_length = self._apply_scale(20)
-        arrow_length = base_length * force_magnitude / (self.random_force_strength * 0.5) * self.accel_arrow_length_scale
+        arrow_length = base_length * force_magnitude / (self.particle_drag_strength * 0.5) * self.accel_arrow_length_scale
         arrow_length = max(5, min(arrow_length, base_length * 3))
         
         # Draw X component arrow (horizontal, red)
@@ -1749,6 +2317,60 @@ class StickFigure:
             (arrowhead_x1, arrowhead_y1),
             (arrowhead_x2, arrowhead_y2)
         ])
+    
+    def _draw_force_values(self, surface, position, force, label):
+        """Draw numerical force values as text next to the force point"""
+        fx, fy, torque = force
+        
+        # Create font for text display
+        try:
+            font = pygame.font.Font(None, 24)
+        except:
+            try:
+                font = pygame.font.SysFont('Arial', 20)
+            except:
+                font = pygame.font.Font(pygame.font.get_default_font(), 18)
+        
+        # Format force values with 1 decimal place
+        fx_str = f"fx: {fx:.1f}"
+        fy_str = f"fy: {fy:.1f}"
+        torque_str = f"τ: {torque:.1f}"
+        magnitude = math.sqrt(fx**2 + fy**2 + abs(torque)**2)
+        mag_str = f"|F|: {magnitude:.1f}"
+        
+        # Create text surfaces
+        label_surface = font.render(f"{label}:", True, (255, 255, 255))
+        fx_surface = font.render(fx_str, True, (255, 150, 150))  # Red tint for X
+        fy_surface = font.render(fy_str, True, (150, 255, 150))  # Green tint for Y
+        torque_surface = font.render(torque_str, True, (150, 150, 255))  # Blue tint for torque
+        mag_surface = font.render(mag_str, True, (255, 255, 200))  # Yellow tint for magnitude
+        
+        # Position text to the right and below the force point
+        text_offset_x = int(self._apply_scale(25))  # Offset to the right
+        text_offset_y = int(self._apply_scale(-40))  # Offset upward (negative Y is up in screen coords)
+        base_x = int(position[0]) + text_offset_x
+        base_y = int(position[1]) + text_offset_y
+        
+        # Background box for readability (create semi-transparent surface)
+        line_height = 22
+        box_width = 150
+        box_height = line_height * 5 + 4
+        box_surface = pygame.Surface((box_width, box_height), pygame.SRCALPHA)
+        box_surface.fill((0, 0, 0, 200))  # Semi-transparent black background
+        pygame.draw.rect(box_surface, (100, 100, 100, 255), (0, 0, box_width, box_height), 1)  # Gray border
+        surface.blit(box_surface, (base_x - 4, base_y - 2))
+        
+        # Draw text lines
+        y_offset = base_y
+        surface.blit(label_surface, (base_x, y_offset))
+        y_offset += line_height
+        surface.blit(fx_surface, (base_x, y_offset))
+        y_offset += line_height
+        surface.blit(fy_surface, (base_x, y_offset))
+        y_offset += line_height
+        surface.blit(torque_surface, (base_x, y_offset))
+        y_offset += line_height
+        surface.blit(mag_surface, (base_x, y_offset))
     
     def _draw_torso_rotation(self, surface):
         """Draw torso rotation visualization: arc showing current angle and rotation limits"""
@@ -1888,6 +2510,285 @@ class StickFigure:
         except (AttributeError, TypeError, ValueError, OverflowError) as e:
             # Skip if calculation fails
             pass
+    
+    def _apply_tilt_constraints(self):
+        """Apply maximum tilt and anti-flip constraints to torso"""
+        torso_body = self.bodies.get('torso')
+        if not torso_body:
+            return
+        
+        try:
+            # Calculate angle relative to vertical (90° = vertical/upright)
+            # In pymunk, 0° points right, 90° points up (vertical)
+            current_angle = torso_body.angle
+            vertical_angle = math.pi / 2  # 90 degrees = vertical
+            angle_from_vertical = current_angle - vertical_angle
+            
+            # Normalize angle_from_vertical to [-π, π] range
+            while angle_from_vertical > math.pi:
+                angle_from_vertical -= 2 * math.pi
+            while angle_from_vertical < -math.pi:
+                angle_from_vertical += 2 * math.pi
+            
+            # Check anti-flip constraint first (stronger constraint)
+            # Prevent torso from rotating beyond ±85° from vertical (anti-flip)
+            if abs(angle_from_vertical) >= self.anti_flip_threshold:
+                # Calculate how far past the threshold
+                excess = abs(angle_from_vertical) - self.anti_flip_threshold
+                
+                # Apply very strong restoring torque
+                if angle_from_vertical > 0:
+                    # Tilted too far clockwise - restore counter-clockwise
+                    restore_torque = -(excess + 0.01) * self.anti_flip_strength
+                else:
+                    # Tilted too far counter-clockwise - restore clockwise
+                    restore_torque = (excess + 0.01) * self.anti_flip_strength
+                
+                torso_body.torque += restore_torque
+                
+                # Strongly dampen angular velocity
+                if (angle_from_vertical > 0 and torso_body.angular_velocity > 0) or \
+                   (angle_from_vertical < 0 and torso_body.angular_velocity < 0):
+                    torso_body.angular_velocity *= 0.1  # Very aggressive damping
+                
+                # Hard clamp if way past limit
+                if abs(angle_from_vertical) > math.radians(90):  # Past ±90° = flipped
+                    if angle_from_vertical > 0:
+                        torso_body.angle = vertical_angle + self.anti_flip_threshold
+                    else:
+                        torso_body.angle = vertical_angle - self.anti_flip_threshold
+                    torso_body.angular_velocity = 0.0
+            
+            # Apply tilt constraint (softer constraint for normal movement)
+            # Maximum tilt is ±45° from vertical
+            elif abs(angle_from_vertical) > self.max_torso_tilt:
+                # Calculate excess tilt
+                excess = abs(angle_from_vertical) - self.max_torso_tilt
+                
+                # Apply restoring torque (softer than anti-flip)
+                if angle_from_vertical > 0:
+                    restore_torque = -excess * self.tilt_restore_strength
+                else:
+                    restore_torque = excess * self.tilt_restore_strength
+                
+                torso_body.torque += restore_torque
+                
+                # Moderate damping when approaching tilt limit
+                if (angle_from_vertical > 0 and torso_body.angular_velocity > 0) or \
+                   (angle_from_vertical < 0 and torso_body.angular_velocity < 0):
+                    torso_body.angular_velocity *= 0.5  # Moderate damping
+                    
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pass
+    
+    def _determine_front_back(self):
+        """Determine if front (F) or back (B) is showing based on torso rotation"""
+        torso_body = self.bodies.get('torso')
+        if not torso_body:
+            return "F"
+        
+        try:
+            # Torso angle: 90° = vertical (upright, front facing)
+            # Front facing: -90° to 90° (torso "up" direction pointing toward viewer)
+            # Back facing: 90° to 270° or -270° to -90° (torso "up" pointing away)
+            current_angle = torso_body.angle
+            vertical_angle = math.pi / 2  # 90 degrees = vertical
+            angle_from_vertical = current_angle - vertical_angle
+            
+            # Normalize to [-π, π]
+            while angle_from_vertical > math.pi:
+                angle_from_vertical -= 2 * math.pi
+            while angle_from_vertical < -math.pi:
+                angle_from_vertical += 2 * math.pi
+            
+            # Front: -π/2 to π/2 (-90° to 90°)
+            # Back: outside that range
+            if -math.pi / 2 <= angle_from_vertical <= math.pi / 2:
+                return "F"
+            else:
+                return "B"
+        except:
+            return "F"
+    
+    def _draw_front_back_indicator(self, surface, torso_body):
+        """Draw F (front) or B (back) indicator on torso"""
+        if not self.front_back_font or not torso_body:
+            return
+        
+        try:
+            # Determine if front or back
+            indicator = self._determine_front_back()
+            
+            # Get torso center position
+            torso_pos = torso_body.position
+            center_x = float(torso_pos.x) if hasattr(torso_pos, 'x') else float(torso_pos[0])
+            center_y = float(torso_pos.y) if hasattr(torso_pos, 'y') else float(torso_pos[1])
+            
+            # Position text slightly above torso center (toward head)
+            text_y_offset = self._apply_scale(self.front_back_indicator_offset_y)
+            
+            # Render text
+            text_surface = self.front_back_font.render(indicator, True, self.front_back_indicator_color)
+            text_rect = text_surface.get_rect()
+            
+            # Rotate text to align with torso orientation for readability
+            current_angle = torso_body.angle
+            # Rotate text so it's readable from the viewer's perspective
+            # Subtract π/2 because torso at 90° is vertical (upright)
+            text_angle = current_angle - math.pi / 2
+            rotated_text = pygame.transform.rotate(text_surface, -math.degrees(text_angle))
+            rotated_rect = rotated_text.get_rect()
+            
+            # Calculate text position (center of torso, offset upward)
+            text_x = int(center_x)
+            text_y = int(center_y + text_y_offset)
+            
+            # Center the rotated text at the position
+            rotated_rect.center = (text_x, text_y)
+            
+            # Draw text with outline for better visibility
+            # Create outline by drawing text multiple times in offset positions
+            outline_color = (0, 0, 0)  # Black outline
+            for dx, dy in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]:
+                outline_rect = rotated_rect.copy()
+                outline_rect.x += dx
+                outline_rect.y += dy
+                outline_surface = pygame.transform.rotate(text_surface, -math.degrees(text_angle))
+                # Create outline text
+                outline_text = self.front_back_font.render(indicator, True, outline_color)
+                outline_rotated = pygame.transform.rotate(outline_text, -math.degrees(text_angle))
+                surface.blit(outline_rotated, outline_rect)
+            
+            # Draw main text
+            surface.blit(rotated_text, rotated_rect)
+            
+        except (AttributeError, TypeError, ValueError) as e:
+            pass
+    
+    def _check_limb_crossing(self):
+        """Check for limb crossings and apply corrective forces"""
+        torso_body = self.bodies.get('torso')
+        if not torso_body:
+            return
+        
+        try:
+            torso_pos = torso_body.position
+            torso_x = float(torso_pos.x) if hasattr(torso_pos, 'x') else float(torso_pos[0])
+            
+            # Define left and right limbs
+            left_limbs = ['left_upper_arm', 'left_forearm', 'left_thigh', 'left_shin']
+            right_limbs = ['right_upper_arm', 'right_forearm', 'right_thigh', 'right_shin']
+            
+            # Check left limbs (should be on left side: x < torso_x)
+            for limb_name in left_limbs:
+                limb_body = self.bodies.get(limb_name)
+                if not limb_body:
+                    continue
+                
+                limb_pos = limb_body.position
+                limb_x = float(limb_pos.x) if hasattr(limb_pos, 'x') else float(limb_pos[0])
+                
+                # Check if limb has crossed to right side
+                if limb_x > torso_x + self.limb_cross_threshold:
+                    # Limb has crossed - apply corrective force to left
+                    cross_distance = limb_x - (torso_x + self.limb_cross_threshold)
+                    force_magnitude = cross_distance * self.limb_corrective_force_strength
+                    limb_body.apply_force_at_local_point((-force_magnitude, 0), (0, 0))
+                # Normalization: gentle force if close to midline but still on correct side
+                elif limb_x > torso_x - self.limb_normalization_threshold:
+                    # Close to midline but on correct side - gentle corrective force
+                    distance_from_midline = limb_x - (torso_x - self.limb_normalization_threshold)
+                    force_magnitude = distance_from_midline * self.limb_normalization_strength
+                    limb_body.apply_force_at_local_point((-force_magnitude, 0), (0, 0))
+            
+            # Check right limbs (should be on right side: x > torso_x)
+            for limb_name in right_limbs:
+                limb_body = self.bodies.get(limb_name)
+                if not limb_body:
+                    continue
+                
+                limb_pos = limb_body.position
+                limb_x = float(limb_pos.x) if hasattr(limb_pos, 'x') else float(limb_pos[0])
+                
+                # Check if limb has crossed to left side
+                if limb_x < torso_x - self.limb_cross_threshold:
+                    # Limb has crossed - apply corrective force to right
+                    cross_distance = (torso_x - self.limb_cross_threshold) - limb_x
+                    force_magnitude = cross_distance * self.limb_corrective_force_strength
+                    limb_body.apply_force_at_local_point((force_magnitude, 0), (0, 0))
+                # Normalization: gentle force if close to midline but still on correct side
+                elif limb_x < torso_x + self.limb_normalization_threshold:
+                    # Close to midline but on correct side - gentle corrective force
+                    distance_from_midline = (torso_x + self.limb_normalization_threshold) - limb_x
+                    force_magnitude = distance_from_midline * self.limb_normalization_strength
+                    limb_body.apply_force_at_local_point((force_magnitude, 0), (0, 0))
+            
+            # Check for limb-to-limb crossing (e.g., left arm crossing right arm)
+            # Compare left and right limb pairs
+            limb_pairs = [
+                ('left_upper_arm', 'right_upper_arm'),
+                ('left_forearm', 'right_forearm'),
+                ('left_thigh', 'right_thigh'),
+                ('left_shin', 'right_shin')
+            ]
+            
+            for left_limb_name, right_limb_name in limb_pairs:
+                left_limb = self.bodies.get(left_limb_name)
+                right_limb = self.bodies.get(right_limb_name)
+                
+                if not left_limb or not right_limb:
+                    continue
+                
+                left_pos = left_limb.position
+                right_pos = right_limb.position
+                left_x = float(left_pos.x) if hasattr(left_pos, 'x') else float(left_pos[0])
+                right_x = float(right_pos.x) if hasattr(right_pos, 'x') else float(right_pos[0])
+                
+                # If left limb is to the right of right limb, they've crossed
+                if left_x > right_x + 10:  # Small threshold to avoid jitter
+                    # Apply forces to push them apart
+                    separation = left_x - right_x
+                    force_strength = separation * self.limb_corrective_force_strength * 0.5
+                    left_limb.apply_force_at_local_point((-force_strength, 0), (0, 0))
+                    right_limb.apply_force_at_local_point((force_strength, 0), (0, 0))
+                    
+        except (AttributeError, TypeError, ValueError) as e:
+            pass
+    
+    def apply_force(self, target: str, force: tuple, torque: float = 0.0, 
+                   duration: float = 0.0, fade_type: str = "instant", current_time: float = 0.0):
+        """
+        Apply force to a sensor target (public method with validation)
+        
+        Args:
+            target: Sensor target name - must be one of: "left_upper_arm", "right_upper_arm", "left_thigh", "right_thigh"
+            force: Force vector (fx, fy)
+            torque: Torque value (default: 0.0)
+            duration: How long force lasts (0.0 = instant/one frame)
+            fade_type: "linear", "exponential", or "instant"
+            current_time: Current time for tracking (default: 0.0)
+        """
+        VALID_TARGETS = ["left_upper_arm", "right_upper_arm", "left_thigh", "right_thigh"]
+        
+        if target not in VALID_TARGETS:
+            raise ValueError(f"Invalid target: {target}. Must be one of {VALID_TARGETS}")
+        
+        if self.force_manager:
+            self.force_manager.apply_force(target, force, torque, duration, fade_type, current_time)
+        else:
+            # Fallback: apply force directly if force manager not available
+            body = self.bodies.get(target)
+            if body:
+                body.apply_force_at_local_point(force, (0, 0))
+                if abs(torque) > 0.001:
+                    body.torque += torque
+    
+    def play_force_sequence(self, sequence_name: str, current_time: float = 0.0):
+        """Play a force sequence by name"""
+        if self.force_manager:
+            self.force_manager.play_sequence(sequence_name, current_time)
+        else:
+            print(f"Warning: ForceManager not available, cannot play sequence: {sequence_name}")
     
     def cleanup(self):
         """Clean up physics resources"""

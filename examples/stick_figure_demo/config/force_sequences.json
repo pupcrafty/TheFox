@@ -1,0 +1,134 @@
+{
+  "sequences": [
+    {
+      "name": "demo_spin",
+      "forces": [
+        {
+          "time": 0.0,
+          "target": "left_upper_arm",
+          "force": [
+            160,
+            0
+          ],
+          "duration": 0.45,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.0,
+          "target": "right_upper_arm",
+          "force": [
+            -160,
+            0
+          ],
+          "duration": 0.45,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.0,
+          "target": "left_thigh",
+          "force": [
+            110,
+            0
+          ],
+          "duration": 0.45,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.0,
+          "target": "right_thigh",
+          "force": [
+            -110,
+            0
+          ],
+          "duration": 0.45,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.55,
+          "target": "left_upper_arm",
+          "force": [
+            160,
+            0
+          ],
+          "duration": 0.45,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.55,
+          "target": "right_upper_arm",
+          "force": [
+            -160,
+            0
+          ],
+          "duration": 0.45,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.55,
+          "target": "left_thigh",
+          "force": [
+            110,
+            0
+          ],
+          "duration": 0.45,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.55,
+          "target": "right_thigh",
+          "force": [
+            -110,
+            0
+          ],
+          "duration": 0.45,
+          "fade_type": "linear"
+        }
+      ]
+    },
+    {
+      "name": "demo_jump",
+      "forces": [
+        {
+          "time": 0.0,
+          "target": "left_thigh",
+          "force": [
+            0,
+            -1200
+          ],
+          "duration": 0.18,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.0,
+          "target": "right_thigh",
+          "force": [
+            0,
+            -1200
+          ],
+          "duration": 0.18,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.05,
+          "target": "left_upper_arm",
+          "force": [
+            0,
+            -500
+          ],
+          "duration": 0.15,
+          "fade_type": "exponential"
+        },
+        {
+          "time": 0.05,
+          "target": "right_upper_arm",
+          "force": [
+            0,
+            -500
+          ],
+          "duration": 0.15,
+          "fade_type": "exponential"
+        }
+      ]
+    }
+  ]
+}

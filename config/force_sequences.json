@@ -1,0 +1,128 @@
+{
+  "sequences": [
+    {
+      "name": "jump",
+      "forces": [
+        {
+          "time": 0.0,
+          "target": "left_thigh",
+          "force": [0, -500],
+          "torque": 0,
+          "duration": 0.2,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.0,
+          "target": "right_thigh",
+          "force": [0, -500],
+          "torque": 0,
+          "duration": 0.2,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.1,
+          "target": "left_upper_arm",
+          "force": [0, -200],
+          "torque": 0,
+          "duration": 0.15,
+          "fade_type": "exponential"
+        },
+        {
+          "time": 0.1,
+          "target": "right_upper_arm",
+          "force": [0, -200],
+          "torque": 0,
+          "duration": 0.15,
+          "fade_type": "exponential"
+        }
+      ]
+    },
+    {
+      "name": "spin",
+      "forces": [
+        {
+          "time": 0.0,
+          "target": "left_upper_arm",
+          "force": [100, 0],
+          "torque": 0,
+          "duration": 0.5,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.0,
+          "target": "right_upper_arm",
+          "force": [-100, 0],
+          "torque": 0,
+          "duration": 0.5,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.0,
+          "target": "left_thigh",
+          "force": [80, 0],
+          "torque": 0,
+          "duration": 0.5,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.0,
+          "target": "right_thigh",
+          "force": [-80, 0],
+          "torque": 0,
+          "duration": 0.5,
+          "fade_type": "linear"
+        }
+      ]
+    },
+    {
+      "name": "wave",
+      "forces": [
+        {
+          "time": 0.0,
+          "target": "right_upper_arm",
+          "force": [150, -100],
+          "torque": 0,
+          "duration": 0.3,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.3,
+          "target": "right_upper_arm",
+          "force": [-150, -100],
+          "torque": 0,
+          "duration": 0.3,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.6,
+          "target": "right_upper_arm",
+          "force": [150, -100],
+          "torque": 0,
+          "duration": 0.3,
+          "fade_type": "linear"
+        }
+      ]
+    },
+    {
+      "name": "lean_left",
+      "forces": [
+        {
+          "time": 0.0,
+          "target": "left_thigh",
+          "force": [-200, 0],
+          "torque": 0,
+          "duration": 0.4,
+          "fade_type": "linear"
+        },
+        {
+          "time": 0.0,
+          "target": "right_thigh",
+          "force": [200, 0],
+          "torque": 0,
+          "duration": 0.4,
+          "fade_type": "linear"
+        }
+      ]
+    }
+  ]
+}
