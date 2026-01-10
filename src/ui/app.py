@@ -88,7 +88,7 @@ class TouchScreenApp:
         self.stick_figure = StickFigure(
             x=screen_width // 2,
             y=screen_height // 2 - 50,
-            scale=1.5
+            scale=1.0  # Reduced scale - was 1.5
         )
         self.stick_figure.set_color(tuple(self.theme['text_color']))
         

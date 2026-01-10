@@ -1,33 +1,45 @@
 #!/usr/bin/env python3
 """
-Stick figure class for animation
-Designed as 2D representation of a 3D figure with articulated joints
+Stick figure class with pymunk physics simulation
+All parts are free-floating but connected with joints
+Vector forces applied to upper arms and thighs (where sensors will be)
 """
 
 import pygame
 import math
 import random
 import time
+import pymunk
 
 
 class StickFigure:
     """
     A stick figure with T-shaped body, 2-part arms, and 2-part legs.
-    Designed to be animated in 3D space (though rendered in 2D).
+    Uses pymunk physics where all parts are free-floating but connected with joints.
+    Forces are applied to upper arms and thighs based on sensor data.
     """
     
-    def __init__(self, x=0, y=0, scale=1.0):
+    def __init__(self, x=0, y=0, scale=1.0, space=None):
         """
-        Initialize the stick figure
+        Initialize the stick figure with pymunk physics
         
         Args:
-            x: X position of the figure's center
-            y: Y position of the figure's center (top of head)
+            x: X position of the figure's center (neck/shoulders)
+            y: Y position of the figure's center
             scale: Scale factor for the entire figure
+            space: pymunk.Space object (creates one if None)
         """
         self.x = x
         self.y = y
         self.scale = scale
+        
+        # Create or use provided physics space
+        if space is None:
+            self.space = pymunk.Space()
+            self.space.gravity = (0, 150)  # Gravity pointing down (initial value, will be updated in update method)
+        else:
+            self.space = space
+        self.owns_space = space is None
         
         # Body proportions (in relative units, will be scaled)
         self.head_radius = 15
@@ -38,30 +50,36 @@ class StickFigure:
         self.thigh_length = 45
         self.shin_length = 40
         
-        # Joint angles (in degrees, for 3D rotation simulation)
-        # 0 degrees = default pose
-        self.head_angle = 0
-        self.torso_angle = 0
+        # Mass for each body segment
+        self.mass = 1.0
+        self.moment_multiplier = 100.0  # Moment of inertia multiplier
         
-        # Left arm angles - start with arms hanging down naturally
-        self.left_shoulder_angle = 180  # Rotation around shoulder (180 = pointing left)
-        self.left_shoulder_lift = 60   # Up/down lift (60 = pointing down at angle)
-        self.left_elbow_angle = 0     # Elbow bend
+        # Limb thickness for collision physics
+        self.limb_thickness = 8.0  # Thickness/radius of limb segments (increased for better collision)
+        self.collision_buffer_zone = 4.0  # Additional buffer zone around limbs for collision (prevents overlap)
+        self.max_joint_distance_factor = 1.2  # Maximum distance joints can stretch (120% of rest length)
         
-        # Right arm angles
-        self.right_shoulder_angle = 0  # 0 = pointing right
-        self.right_shoulder_lift = 60   # Pointing down at angle
-        self.right_elbow_angle = 0
+        # Collision groups: limbs can collide with each other but not with directly connected parts
+        # Each part gets a unique category bit
+        self.collision_categories = {
+            'head': 0x1,
+            'torso': 0x2,
+            'shoulders': 0x4,
+            'left_upper_arm': 0x8,
+            'right_upper_arm': 0x10,
+            'left_forearm': 0x20,
+            'right_forearm': 0x40,
+            'left_thigh': 0x80,
+            'right_thigh': 0x100,
+            'left_shin': 0x200,
+            'right_shin': 0x400,
+        }
         
-        # Left leg angles - start with legs pointing down
-        self.left_hip_angle = 0       # Rotation around hip (straight down)
-        self.left_hip_lift = 90       # Forward/backward lift (90 = pointing straight down)
-        self.left_knee_angle = 0      # Knee bend
-        
-        # Right leg angles
-        self.right_hip_angle = 0
-        self.right_hip_lift = 90      # Pointing straight down
-        self.right_knee_angle = 0
+        # Physics bodies and joints storage
+        self.bodies = {}
+        self.joints = {}
+        self.constraints = {}
+        self.limb_lengths = {}  # Store limb lengths for easier access
         
         # Color
         self.color = (255, 255, 255)  # White by default
@@ -70,69 +88,865 @@ class StickFigure:
         # Acceleration visualization
         self.show_accelerations = False
         self.accel_circle_radius = 8
-        self.accel_arrow_length_scale = 2.0  # Scale factor for arrow length
-        self.accel_arrow_color = (255, 200, 0)  # Orange/yellow for acceleration arrows
-        self.accel_circle_color = (0, 255, 255)  # Cyan for acceleration point circles
+        self.accel_arrow_length_scale = 2.0
+        self.accel_arrow_color = (255, 200, 0)
+        self.accel_circle_color = (0, 255, 255)
         
-        # Physics simulation for acceleration-based movement
-        # Accelerations (can be set from sensors later)
-        # Format: (x_accel, y_accel, z_accel) in degrees per second squared
-        self.left_upper_arm_accel = (0.0, 0.0, 0.0)
-        self.right_upper_arm_accel = (0.0, 0.0, 0.0)
-        self.left_upper_leg_accel = (0.0, 0.0, 0.0)
-        self.right_upper_leg_accel = (0.0, 0.0, 0.0)
+        # Forces applied to upper arms and thighs (from sensors)
+        # Format: (fx, fy, torque) in physics units
+        self.left_upper_arm_force = (0.0, 0.0, 0.0)
+        self.right_upper_arm_force = (0.0, 0.0, 0.0)
+        self.left_upper_leg_force = (0.0, 0.0, 0.0)
+        self.right_upper_leg_force = (0.0, 0.0, 0.0)
         
-        # Target accelerations for smooth interpolation
-        self.left_upper_arm_target_accel = (0.0, 0.0, 0.0)
-        self.right_upper_arm_target_accel = (0.0, 0.0, 0.0)
-        self.left_upper_leg_target_accel = (0.0, 0.0, 0.0)
-        self.right_upper_leg_target_accel = (0.0, 0.0, 0.0)
-        
-        # Velocities (angular velocities in degrees per second)
-        self.left_shoulder_vel = 0.0
-        self.left_shoulder_lift_vel = 0.0
-        self.right_shoulder_vel = 0.0
-        self.right_shoulder_lift_vel = 0.0
-        self.left_hip_vel = 0.0
-        self.left_hip_lift_vel = 0.0
-        self.right_hip_vel = 0.0
-        self.right_hip_lift_vel = 0.0
-        
-        # Elbow and knee velocities (for lower limb parts - forearms and shins)
-        # These will lag behind upper limb movement due to inertia and drag
-        self.left_elbow_vel = 0.0
-        self.right_elbow_vel = 0.0
-        self.left_knee_vel = 0.0
-        self.right_knee_vel = 0.0
+        # Target forces for smooth interpolation
+        self.left_upper_arm_target_force = (0.0, 0.0, 0.0)
+        self.right_upper_arm_target_force = (0.0, 0.0, 0.0)
+        self.left_upper_leg_target_force = (0.0, 0.0, 0.0)
+        self.right_upper_leg_target_force = (0.0, 0.0, 0.0)
         
         # Physics parameters
-        self.damping = 0.98  # Velocity damping factor (0-1, higher = less damping) - increased for more movement
-        self.leg_damping = 0.96  # Additional damping for lower limbs (legs) - makes them slower/more sluggish
-        self.accel_scale = 1.0  # Scale factor for acceleration to velocity conversion - increased for more responsiveness
-        self.max_velocity = 360.0  # Maximum angular velocity in degrees per second - increased for more movement
-        self.accel_interpolation_speed = 5.0  # Speed of acceleration interpolation (higher = faster, smoother transitions)
+        self.damping = 0.96  # Velocity damping (reduced damping for more responsiveness to forces)
+        self.force_interpolation_speed = 5.0  # Speed of force interpolation
+        self.force_scale = 1200.0  # Scale factor for converting sensor data to forces (increased for better response)
         
-        # Lower limb physics parameters (forearms and shins)
-        self.lower_limb_inertia = 0.4  # How much lower limb responds to upper limb movement (0-1, lower = more lag)
-        self.lower_limb_damping = 0.88  # Drag on lower limbs (creates lag/bend effect, lower = more drag)
-        self.lower_limb_max_bend = 160.0  # Maximum bend angle in degrees (for elbows and knees)
-        self.lower_limb_response_speed = 30.0  # Speed at which lower limbs respond to upper limb movement
+        # Gravity and normalizing force parameters
+        self.gravity_strength = 150.0  # Gravity in pixels per second squared (downward) - reduced for lighter gravity
+        self.normalizing_force_strength = 150.0  # Strength of normalizing force (increased for more control)
+        self.center_restore_force = 300.0  # Force to restore center position (stronger to keep centered)
+        self.apply_normalizing_forces = True  # Enable/disable normalizing forces
+        self.max_velocity = 400.0  # Maximum velocity before normalization (further reduced for stability)
+        self.max_angular_velocity = 8.0  # Maximum angular velocity (radians per second) - further reduced
         
-        # Random acceleration parameters
-        self.use_random_accel = True
-        self.random_accel_strength = 30.0  # Maximum random acceleration (increased for more movement)
-        self.random_accel_change_rate = 0.15  # Probability of changing acceleration each frame (increased)
+        # Random force parameters (for testing, will be replaced by sensor data)
+        self.use_random_forces = True
+        self.random_force_strength = 150.0  # Further reduced to prevent excessive forces and instability
+        self.random_force_change_rate = 0.10  # Reduced for smoother changes
         self.last_random_update = 0
-        self.random_update_interval = 50  # Update random accelerations every N milliseconds (more frequent)
+        self.random_update_interval = 50
         
+        # Build the physics structure
+        self._build_physics_structure()
+        
+        # Set initial pose after all bodies are created
+        # The _set_initial_pose will position and orient all bodies
+        self._set_initial_pose()
+    
+    def _build_physics_structure(self):
+        """Build the physics bodies and joints for the stick figure"""
+        # Calculate scaled dimensions
+        scaled_head_radius = self._apply_scale(self.head_radius)
+        scaled_torso = self._apply_scale(self.torso_length)
+        scaled_shoulder_width = self._apply_scale(self.shoulder_width / 2)
+        scaled_upper_arm = self._apply_scale(self.upper_arm_length)
+        scaled_forearm = self._apply_scale(self.forearm_length)
+        scaled_thigh = self._apply_scale(self.thigh_length)
+        scaled_shin = self._apply_scale(self.shin_length)
+        
+        # Neck/Torso connection point (where shoulders are)
+        # Calculate where torso center should be
+        torso_center_y = self.y + scaled_head_radius + scaled_torso / 2
+        
+        # Create a static pivot point at torso center to keep body centered but allow rotation
+        static_body = pymunk.Body(body_type=pymunk.Body.STATIC)
+        static_body.position = (self.x, torso_center_y)  # Pivot at torso center
+        self.bodies['center_pivot'] = static_body
+        
+        # Torso (inverted isosceles triangle - T-shaped body)
+        # Triangle: wide at top (shoulders/base) tapering down to point at bottom (hips/apex)
+        torso_mass = self.mass * 1.5
+        # Triangle vertices relative to body center (local coordinates)
+        # Base of triangle is at top (shoulders), apex is at bottom (hips)
+        triangle_width_top = scaled_shoulder_width  # Wide at top (shoulders - base of triangle)
+        triangle_apex_bottom = scaled_torso/2  # Bottom point (hips - apex of triangle)
+        triangle_base_top = -scaled_torso/2  # Top base line (shoulders)
+        
+        # Create triangle vertices in counterclockwise order for pymunk:
+        # top left (left shoulder) -> top right (right shoulder) -> bottom point (hips) -> back to top left
+        triangle_vertices = [
+            (-triangle_width_top/2, triangle_base_top),  # Left shoulder (top left corner)
+            (triangle_width_top/2, triangle_base_top),  # Right shoulder (top right corner)
+            (0, triangle_apex_bottom),  # Hips (bottom point/apex)
+        ]
+        # Triangle: wide at top (shoulders/base), narrows to point at bottom (hips/apex)
+        
+        # Calculate moment of inertia for triangle
+        torso_moment = pymunk.moment_for_poly(torso_mass, triangle_vertices, (0, 0))
+        torso_body = pymunk.Body(torso_mass, torso_moment)
+        torso_shape = pymunk.Poly(torso_body, triangle_vertices)
+        torso_shape.friction = 0.7
+        torso_shape.density = 0.5
+        # Torso can collide with all limbs but not head/thighs (directly connected)
+        # No separate shoulders body now - triangle base IS the shoulders
+        torso_category = self.collision_categories['torso']
+        torso_mask = 0xFFFF & ~(self.collision_categories['head'] | 
+                                self.collision_categories['left_thigh'] | self.collision_categories['right_thigh'] |
+                                self.collision_categories['left_upper_arm'] | self.collision_categories['right_upper_arm'])
+        torso_shape.filter = pymunk.ShapeFilter(categories=torso_category, mask=torso_mask)
+        self.space.add(torso_body, torso_shape)
+        self.bodies['torso'] = torso_body
+        torso_body.position = (self.x, torso_center_y)  # Torso center at pivot point
+        torso_body.angle = math.pi / 2  # Vertical (90 degrees)
+        
+        # Store initial angle and rotation limits for torso
+        self.torso_initial_angle = math.pi / 2  # 90 degrees (vertical)
+        self.torso_max_rotation = math.radians(100)  # ±100 degrees from initial
+        
+        # Connect torso to center pivot at torso center (allows rotation but keeps centered)
+        # Both anchor points are at (0, 0) in their local coordinates (center of each body)
+        pivot_joint = pymunk.PinJoint(static_body, torso_body, (0, 0), (0, 0))
+        self.space.add(pivot_joint)
+        self.joints['torso_pivot'] = pivot_joint
+        
+        # Head (circle body at top) - positioned above torso
+        # Lighter head mass to reduce gravitational pull
+        head_mass = self.mass * 0.3  # Reduced from 0.5 to 0.3 for stability
+        # Add collision buffer zone to head radius
+        head_collision_radius = scaled_head_radius + self._apply_scale(self.collision_buffer_zone)
+        head_moment = pymunk.moment_for_circle(head_mass, 0, head_collision_radius)
+        head_body = pymunk.Body(head_mass, head_moment)
+        head_shape = pymunk.Circle(head_body, head_collision_radius)
+        head_shape.friction = 0.7
+        head_shape.density = 0.5
+        # Head can collide with all limbs but not torso (directly connected)
+        # No separate shoulders - triangle base is the shoulders
+        head_category = self.collision_categories['head']
+        head_mask = 0xFFFF & ~(self.collision_categories['torso'])
+        head_shape.filter = pymunk.ShapeFilter(categories=head_category, mask=head_mask)
+        self.space.add(head_body, head_shape)
+        self.bodies['head'] = head_body
+        
+        # Position head above torso, touching it
+        head_y = torso_center_y - scaled_torso/2 - scaled_head_radius
+        head_body.position = (self.x, head_y)
+        head_body.angle = 0
+        
+        # Connect head to torso - allow leaning but constrain distance
+        # Head attaches at bottom of head circle, torso attaches at top center (middle of shoulder base)
+        head_anchor_local = (0, scaled_head_radius)  # Local to head (bottom of circle)
+        torso_anchor_local = (0, -scaled_torso/2)  # Local to torso (top center of triangle)
+        head_torso_joint = pymunk.PinJoint(head_body, torso_body, head_anchor_local, torso_anchor_local)
+        
+        # Reduced rotational spring to allow head leaning/tilting
+        # Lower stiffness allows more rotation, moderate damping prevents oscillation
+        head_torso_spring = pymunk.DampedRotarySpring(head_body, torso_body, 0, 800.0, 80.0)  # Reduced for leaning
+        
+        # Moderate distance spring - keeps head close but allows some movement
+        head_rest_distance = 0  # Pin joint, so rest distance is 0 (touching)
+        head_torso_distance_spring = pymunk.DampedSpring(head_body, torso_body, 
+                                                         head_anchor_local, torso_anchor_local,
+                                                         head_rest_distance, 2000.0, 150.0)  # Moderate spring
+        
+        self.space.add(head_torso_joint, head_torso_spring, head_torso_distance_spring)
+        self.joints['head_torso'] = head_torso_joint
+        self.constraints['head_torso_spring'] = head_torso_spring
+        self.constraints['head_torso_distance_spring'] = head_torso_distance_spring
+        
+        # Store head anchor info for distance enforcement
+        self.head_anchor_local = head_anchor_local
+        self.torso_anchor_local = torso_anchor_local
+        self.head_max_distance = self._apply_scale(15.0)  # Maximum distance head can be from anchor (small)
+        
+        # Arms attach directly to triangle's shoulder corners (base of triangle)
+        # Left upper arm - connected to left shoulder corner of triangle (top left vertex)
+        left_upper_arm = self._create_limb_segment('left_upper_arm', scaled_upper_arm, self.mass * 0.8)
+        left_shoulder_local = (-triangle_width_top/2, triangle_base_top)  # Left shoulder corner of triangle
+        left_shoulder_world = torso_body.local_to_world(left_shoulder_local)
+        left_upper_arm.position = (left_shoulder_world.x - scaled_upper_arm/2, left_shoulder_world.y)
+        left_upper_arm.angle = math.radians(135)  # Down-left initially
+        left_shoulder_joint = pymunk.PinJoint(left_upper_arm, torso_body, (-scaled_upper_arm/2, 0), left_shoulder_local)
+        self.space.add(left_shoulder_joint)
+        self.joints['left_shoulder'] = left_shoulder_joint
+        # Add distance constraint to prevent stretching
+        left_shoulder_distance = pymunk.DampedSpring(left_upper_arm, torso_body,
+                                                     (-scaled_upper_arm/2, 0), left_shoulder_local,
+                                                     0, 2000.0, 100.0)
+        self.space.add(left_shoulder_distance)
+        self.constraints['left_shoulder_distance'] = left_shoulder_distance
+        
+        # Right upper arm - connected to right shoulder corner of triangle (top right vertex)
+        right_upper_arm = self._create_limb_segment('right_upper_arm', scaled_upper_arm, self.mass * 0.8)
+        right_shoulder_local = (triangle_width_top/2, triangle_base_top)  # Right shoulder corner of triangle
+        right_shoulder_world = torso_body.local_to_world(right_shoulder_local)
+        right_upper_arm.position = (right_shoulder_world.x - scaled_upper_arm/2, right_shoulder_world.y)
+        right_upper_arm.angle = math.radians(45)  # Down-right initially
+        right_shoulder_joint = pymunk.PinJoint(right_upper_arm, torso_body, (-scaled_upper_arm/2, 0), right_shoulder_local)
+        self.space.add(right_shoulder_joint)
+        self.joints['right_shoulder'] = right_shoulder_joint
+        # Add distance constraint
+        right_shoulder_distance = pymunk.DampedSpring(right_upper_arm, torso_body,
+                                                      (-scaled_upper_arm/2, 0), right_shoulder_local,
+                                                      0, 2000.0, 100.0)
+        self.space.add(right_shoulder_distance)
+        self.constraints['right_shoulder_distance'] = right_shoulder_distance
+        
+        # Left forearm - connected to end of left upper arm
+        left_forearm = self._create_limb_segment('left_forearm', scaled_forearm, self.mass * 0.6)
+        left_elbow_pos = left_upper_arm.local_to_world((scaled_upper_arm/2, 0))
+        left_forearm.position = (left_elbow_pos.x - scaled_forearm/2, left_elbow_pos.y)
+        left_forearm.angle = math.radians(135)  # Extends from upper arm
+        left_elbow_joint = pymunk.PinJoint(left_forearm, left_upper_arm, (-scaled_forearm/2, 0), (scaled_upper_arm/2, 0))
+        self.space.add(left_elbow_joint)
+        self.joints['left_elbow'] = left_elbow_joint
+        # Add distance constraint with max stretch limit
+        max_elbow_distance = 0  # Pin joint, so rest length is 0, max stretch prevents over-stretching
+        left_elbow_distance = pymunk.DampedSpring(left_forearm, left_upper_arm,
+                                                  (-scaled_forearm/2, 0), (scaled_upper_arm/2, 0),
+                                                  max_elbow_distance, 2000.0, 100.0)
+        self.space.add(left_elbow_distance)
+        self.constraints['left_elbow_distance'] = left_elbow_distance
+        
+        # Right forearm - connected to end of right upper arm
+        right_forearm = self._create_limb_segment('right_forearm', scaled_forearm, self.mass * 0.6)
+        right_elbow_pos = right_upper_arm.local_to_world((scaled_upper_arm/2, 0))
+        right_forearm.position = (right_elbow_pos.x - scaled_forearm/2, right_elbow_pos.y)
+        right_forearm.angle = math.radians(45)  # Extends from upper arm
+        right_elbow_joint = pymunk.PinJoint(right_forearm, right_upper_arm, (-scaled_forearm/2, 0), (scaled_upper_arm/2, 0))
+        self.space.add(right_elbow_joint)
+        self.joints['right_elbow'] = right_elbow_joint
+        # Add distance constraint
+        right_elbow_distance = pymunk.DampedSpring(right_forearm, right_upper_arm,
+                                                   (-scaled_forearm/2, 0), (scaled_upper_arm/2, 0),
+                                                   0, 2000.0, 100.0)
+        self.space.add(right_elbow_distance)
+        self.constraints['right_elbow_distance'] = right_elbow_distance
+        
+        # Hips (hip connection point) - bottom apex of triangle
+        # Both thighs attach to the same apex point (triangle bottom point)
+        hip_apex_local = (0, triangle_apex_bottom)  # Triangle apex at bottom (hips)
+        hip_apex_world = torso_body.local_to_world(hip_apex_local)
+        
+        # Left thigh - connected to triangle apex (bottom point)
+        left_thigh = self._create_limb_segment('left_thigh', scaled_thigh, self.mass * 1.0)
+        left_thigh_body = self.bodies['left_thigh']
+        # Position thigh so it attaches at its top to the triangle apex
+        left_thigh_body.position = (hip_apex_world.x - scaled_thigh/2, hip_apex_world.y)
+        left_thigh_body.angle = math.pi / 2  # Down initially
+        left_hip_joint = pymunk.PinJoint(torso_body, left_thigh_body, hip_apex_local, (-scaled_thigh/2, 0))
+        self.space.add(left_hip_joint)
+        self.joints['left_hip'] = left_hip_joint
+        # Add distance constraint
+        left_hip_distance = pymunk.DampedSpring(torso_body, left_thigh_body,
+                                                hip_apex_local, (-scaled_thigh/2, 0),
+                                                0, 2000.0, 100.0)
+        self.space.add(left_hip_distance)
+        self.constraints['left_hip_distance'] = left_hip_distance
+        
+        # Right thigh - connected to triangle apex (bottom point - same point as left)
+        right_thigh = self._create_limb_segment('right_thigh', scaled_thigh, self.mass * 1.0)
+        right_thigh_body = self.bodies['right_thigh']
+        # Position thigh so it attaches at its top to the triangle apex
+        right_thigh_body.position = (hip_apex_world.x - scaled_thigh/2, hip_apex_world.y)
+        right_thigh_body.angle = math.pi / 2  # Down initially
+        right_hip_joint = pymunk.PinJoint(torso_body, right_thigh_body, hip_apex_local, (-scaled_thigh/2, 0))
+        self.space.add(right_hip_joint)
+        self.joints['right_hip'] = right_hip_joint
+        # Add distance constraint
+        right_hip_distance = pymunk.DampedSpring(torso_body, right_thigh_body,
+                                                 hip_apex_local, (-scaled_thigh/2, 0),
+                                                 0, 2000.0, 100.0)
+        self.space.add(right_hip_distance)
+        self.constraints['right_hip_distance'] = right_hip_distance
+        
+        # Left shin - connected to end of left thigh
+        left_shin = self._create_limb_segment('left_shin', scaled_shin, self.mass * 0.7)
+        left_knee_pos = left_thigh_body.local_to_world((scaled_thigh/2, 0))
+        left_shin.position = (left_knee_pos.x - scaled_shin/2, left_knee_pos.y)
+        left_shin.angle = math.pi / 2  # Down initially
+        left_knee_joint = pymunk.PinJoint(left_shin, left_thigh_body, (-scaled_shin/2, 0), (scaled_thigh/2, 0))
+        self.space.add(left_knee_joint)
+        self.joints['left_knee'] = left_knee_joint
+        # Add distance constraint
+        left_knee_distance = pymunk.DampedSpring(left_shin, left_thigh_body,
+                                                 (-scaled_shin/2, 0), (scaled_thigh/2, 0),
+                                                 0, 2000.0, 100.0)
+        self.space.add(left_knee_distance)
+        self.constraints['left_knee_distance'] = left_knee_distance
+        
+        # Right shin - connected to end of right thigh
+        right_shin = self._create_limb_segment('right_shin', scaled_shin, self.mass * 0.7)
+        right_knee_pos = right_thigh_body.local_to_world((scaled_thigh/2, 0))
+        right_shin.position = (right_knee_pos.x - scaled_shin/2, right_knee_pos.y)
+        right_shin.angle = math.pi / 2  # Down initially
+        right_knee_joint = pymunk.PinJoint(right_shin, right_thigh_body, (-scaled_shin/2, 0), (scaled_thigh/2, 0))
+        self.space.add(right_knee_joint)
+        self.joints['right_knee'] = right_knee_joint
+        # Add distance constraint
+        right_knee_distance = pymunk.DampedSpring(right_shin, right_thigh_body,
+                                                  (-scaled_shin/2, 0), (scaled_thigh/2, 0),
+                                                  0, 2000.0, 100.0)
+        self.space.add(right_knee_distance)
+        self.constraints['right_knee_distance'] = right_knee_distance
+        
+        # Damping will be applied in update method
+    
+    def _create_limb_segment(self, name, length, mass):
+        """Create a limb segment body with thickness and collision buffer zone for collision physics"""
+        base_thickness = self._apply_scale(self.limb_thickness)
+        # Add collision buffer zone to prevent limbs from crossing each other
+        # (thickness is radius, so adding buffer increases diameter by 2*buffer, giving buffer on each side)
+        collision_thickness = base_thickness + self._apply_scale(self.collision_buffer_zone)
+        moment = pymunk.moment_for_segment(mass, (-length/2, 0), (length/2, 0), collision_thickness)
+        body = pymunk.Body(mass, moment)
+        shape = pymunk.Segment(body, (-length/2, 0), (length/2, 0), collision_thickness)
+        shape.friction = 0.7  # Increased friction for better stability
+        shape.density = 0.5  # Set density for collision response
+        
+        # Set up collision filtering: limbs can collide with each other but not with directly connected parts
+        category = self.collision_categories.get(name, 0x1)
+        
+        # Determine what this limb should NOT collide with (directly connected parts)
+        excluded_categories = 0
+        if name == 'left_upper_arm':
+            # Upper arms attach to torso triangle base (shoulders), so exclude torso and forearm
+            excluded_categories = (self.collision_categories['torso'] | 
+                                  self.collision_categories['left_forearm'])
+        elif name == 'right_upper_arm':
+            # Upper arms attach to torso triangle base (shoulders), so exclude torso and forearm
+            excluded_categories = (self.collision_categories['torso'] | 
+                                  self.collision_categories['right_forearm'])
+        elif name == 'left_forearm':
+            excluded_categories = self.collision_categories['left_upper_arm']
+        elif name == 'right_forearm':
+            excluded_categories = self.collision_categories['right_upper_arm']
+        elif name == 'left_thigh':
+            excluded_categories = (self.collision_categories['torso'] | 
+                                  self.collision_categories['left_shin'])
+        elif name == 'right_thigh':
+            excluded_categories = (self.collision_categories['torso'] | 
+                                  self.collision_categories['right_shin'])
+        elif name == 'left_shin':
+            excluded_categories = self.collision_categories['left_thigh']
+        elif name == 'right_shin':
+            excluded_categories = self.collision_categories['right_thigh']
+        
+        # Can collide with everything except directly connected parts and itself
+        mask = 0xFFFF & ~excluded_categories & ~category
+        
+        shape.filter = pymunk.ShapeFilter(categories=category, mask=mask)
+        self.space.add(body, shape)
+        self.bodies[name] = body
+        self.limb_lengths[name] = length  # Store length for easy access
+        return body
+    
+    def _enforce_head_distance(self):
+        """
+        Enforce maximum distance for head from its anchor point on triangle
+        Allows head to lean/tilt but keeps it within a small distance from anchor
+        Also prevents head from going below the shoulder line (triangle base)
+        """
+        head_body = self.bodies.get('head')
+        torso_body = self.bodies.get('torso')
+        
+        if not head_body or not torso_body or not hasattr(self, 'head_anchor_local') or not hasattr(self, 'torso_anchor_local'):
+            return
+        
+        try:
+            scaled_torso = self._apply_scale(self.torso_length)
+            scaled_head_radius = self._apply_scale(self.head_radius)
+            
+            # Get world positions of anchor points
+            head_anchor_world = head_body.local_to_world(self.head_anchor_local)
+            torso_anchor_world = torso_body.local_to_world(self.torso_anchor_local)
+            
+            # Calculate distance between anchor points
+            if hasattr(head_anchor_world, 'x') and hasattr(torso_anchor_world, 'x'):
+                dx = float(head_anchor_world.x) - float(torso_anchor_world.x)
+                dy = float(head_anchor_world.y) - float(torso_anchor_world.y)
+            elif isinstance(head_anchor_world, (tuple, list)) and isinstance(torso_anchor_world, (tuple, list)):
+                dx = float(head_anchor_world[0]) - float(torso_anchor_world[0])
+                dy = float(head_anchor_world[1]) - float(torso_anchor_world[1])
+            else:
+                return
+            
+            # Clamp to prevent overflow
+            dx = max(-1000, min(1000, dx))
+            dy = max(-1000, min(1000, dy))
+            
+            current_distance_sq = dx * dx + dy * dy
+            if current_distance_sq > 1e6:  # Overflow protection
+                return
+            
+            current_distance = math.sqrt(current_distance_sq)
+            max_distance = self.head_max_distance
+            
+            # Get shoulder line position (triangle base top) in world coordinates
+            # Shoulder line is at triangle_base_top = -scaled_torso/2 in local torso coordinates
+            # We'll check both left and right shoulder corners to ensure head doesn't go past the line
+            scaled_shoulder_width = self._apply_scale(self.shoulder_width)
+            left_shoulder_local = (-scaled_shoulder_width/2, -scaled_torso/2)  # Left shoulder corner
+            right_shoulder_local = (scaled_shoulder_width/2, -scaled_torso/2)  # Right shoulder corner
+            
+            left_shoulder_world = torso_body.local_to_world(left_shoulder_local)
+            right_shoulder_world = torso_body.local_to_world(right_shoulder_local)
+            
+            # Get y-coordinate of shoulder line (should be same for left and right corners)
+            shoulder_line_y_left = float(left_shoulder_world.y) if hasattr(left_shoulder_world, 'y') else float(left_shoulder_world[1])
+            shoulder_line_y_right = float(right_shoulder_world.y) if hasattr(right_shoulder_world, 'y') else float(right_shoulder_world[1])
+            shoulder_line_y = (shoulder_line_y_left + shoulder_line_y_right) / 2.0  # Average y of shoulder line
+            
+            # Get head center and bottom position
+            head_center = head_body.position
+            head_center_y = float(head_center.y) if hasattr(head_center, 'y') else float(head_center[1])
+            
+            # Head bottom is center_y + radius (positive y is downward in screen coords)
+            head_bottom_y = head_center_y + scaled_head_radius
+            
+            # Check if head goes below shoulder line (head_bottom_y > shoulder_line_y means head is below)
+            if head_bottom_y > shoulder_line_y:
+                # Head is below shoulder line - push it back up
+                excess_y = head_bottom_y - shoulder_line_y
+                # Strong upward force (negative y) to keep head above shoulder line
+                upward_force = -excess_y * 10000.0  # Very strong force to prevent head going past shoulders
+                upward_force = max(-200000.0, min(200000.0, upward_force))  # Clamp force
+                # Apply upward force at head center for more effective push
+                head_body.apply_force_at_local_point((0, upward_force), (0, 0))
+                
+                # Also reduce vertical velocity if head is trying to move down past shoulder line
+                if head_body.velocity.y > 0:  # Moving downward
+                    # Dampen downward velocity more aggressively
+                    head_body.velocity = (head_body.velocity.x, head_body.velocity.y * 0.5)
+            
+            # If distance exceeds maximum, apply restoring force
+            if current_distance > max_distance:
+                if current_distance > 0.1:  # Avoid division by zero
+                    direction_x = dx / current_distance
+                    direction_y = dy / current_distance
+                    excess_distance = current_distance - max_distance
+                    
+                    # Apply restoring force to bring head back within max distance
+                    # Strong enough to prevent stretching but not too strong to prevent leaning
+                    restore_force_strength = 3000.0  # Moderate strength - allows some movement
+                    force_x = -direction_x * excess_distance * restore_force_strength
+                    force_y = -direction_y * excess_distance * restore_force_strength
+                    
+                    # Clamp forces
+                    max_force = 50000.0
+                    force_x = max(-max_force, min(max_force, force_x))
+                    force_y = max(-max_force, min(max_force, force_y))
+                    
+                    # Apply forces at anchor points for more realistic behavior
+                    head_body.apply_force_at_local_point((force_x, force_y), self.head_anchor_local)
+                    torso_body.apply_force_at_local_point((-force_x * 0.5, -force_y * 0.5), self.torso_anchor_local)
+        except (AttributeError, TypeError, ValueError, OverflowError, ZeroDivisionError):
+            pass  # Skip if calculation fails
+    
+    def _enforce_max_distances(self):
+        """
+        Enforce maximum distances between connected parts to prevent over-stretching
+        This prevents limbs from becoming "silly string" and flying off
+        Uses the actual joint positions calculated from bodies
+        """
+        try:
+            positions = self.get_joint_positions()
+        except:
+            return  # Skip if we can't get positions
+        
+        # Special enforcement for head attachment - allow leaning but constrain distance
+        self._enforce_head_distance()
+        
+        # Define maximum allowed distances between joint points
+        # Format: (pos1_key, pos2_key, max_distance_factor, base_length)
+        distance_limits = [
+            # Head to neck (should stay VERY close - critical for head staying on)
+            # Head distance is handled separately in _enforce_head_distance()
+            # Arms (shoulders are part of triangle base now)
+            ('left_shoulder', 'left_elbow', 1.3, self._apply_scale(self.upper_arm_length)),
+            ('left_elbow', 'left_wrist', 1.3, self._apply_scale(self.forearm_length)),
+            ('right_shoulder', 'right_elbow', 1.3, self._apply_scale(self.upper_arm_length)),
+            ('right_elbow', 'right_wrist', 1.3, self._apply_scale(self.forearm_length)),
+            # Legs (both attach to triangle apex)
+            ('left_hip', 'left_knee', 1.3, self._apply_scale(self.thigh_length)),
+            ('left_knee', 'left_ankle', 1.3, self._apply_scale(self.shin_length)),
+            ('right_hip', 'right_knee', 1.3, self._apply_scale(self.thigh_length)),
+            ('right_knee', 'right_ankle', 1.3, self._apply_scale(self.shin_length)),
+        ]
+        
+        for pos1_key, pos2_key, max_factor, base_length in distance_limits:
+            pos1 = positions.get(pos1_key)
+            pos2 = positions.get(pos2_key)
+            
+            if not pos1 or not pos2:
+                continue
+            
+            try:
+                # Extract coordinates safely
+                if isinstance(pos1, (tuple, list)) and isinstance(pos2, (tuple, list)):
+                    x1, y1 = float(pos1[0]), float(pos1[1])
+                    x2, y2 = float(pos2[0]), float(pos2[1])
+                else:
+                    continue
+                
+                # Calculate current distance
+                dx = x1 - x2
+                dy = y1 - y2
+                
+                # Clamp to prevent overflow
+                dx = max(-5000, min(5000, dx))
+                dy = max(-5000, min(5000, dy))
+                
+                current_distance_sq = dx * dx + dy * dy
+                if current_distance_sq > 1e8:  # Overflow protection
+                    continue
+                
+                current_distance = math.sqrt(current_distance_sq)
+                max_distance = base_length * max_factor
+                
+                # If distance exceeds maximum, apply restoring force to the bodies
+                if current_distance > max_distance:
+                    # Find which bodies these positions belong to
+                    body1 = None
+                    body2 = None
+                    
+                    # Map positions to bodies
+                    if pos1_key in ['head_center']:
+                        body1 = self.bodies.get('head')
+                    elif pos1_key in ['neck', 'waist', 'shoulder_center', 'left_shoulder', 'right_shoulder']:
+                        # Shoulders and neck/waist are part of torso triangle
+                        body1 = self.bodies.get('torso')
+                    elif pos1_key in ['left_elbow', 'left_wrist']:
+                        if 'elbow' in pos1_key:
+                            body1 = self.bodies.get('left_upper_arm')
+                        elif 'wrist' in pos1_key:
+                            body1 = self.bodies.get('left_forearm')
+                    elif pos1_key in ['right_elbow', 'right_wrist']:
+                        if 'elbow' in pos1_key:
+                            body1 = self.bodies.get('right_upper_arm')
+                        elif 'wrist' in pos1_key:
+                            body1 = self.bodies.get('right_forearm')
+                    elif pos1_key in ['left_hip', 'left_knee', 'left_ankle']:
+                        if 'hip' in pos1_key:
+                            body1 = self.bodies.get('left_thigh')
+                        elif 'knee' in pos1_key:
+                            body1 = self.bodies.get('left_shin')
+                        elif 'ankle' in pos1_key:
+                            body1 = self.bodies.get('left_shin')
+                    elif pos1_key in ['right_hip', 'right_knee', 'right_ankle']:
+                        if 'hip' in pos1_key:
+                            body1 = self.bodies.get('right_thigh')
+                        elif 'knee' in pos1_key:
+                            body1 = self.bodies.get('right_shin')
+                        elif 'ankle' in pos1_key:
+                            body1 = self.bodies.get('right_shin')
+                    
+                    # Same for pos2_key
+                    if pos2_key in ['neck', 'waist', 'shoulder_center', 'left_shoulder', 'right_shoulder', 'left_hip', 'right_hip']:
+                        # Shoulders, neck, waist, and hips are part of torso triangle
+                        body2 = self.bodies.get('torso')
+                    elif pos2_key in ['left_elbow', 'left_wrist']:
+                        if 'elbow' in pos2_key:
+                            body2 = self.bodies.get('left_upper_arm')
+                        else:
+                            body2 = self.bodies.get('left_forearm')
+                    elif pos2_key in ['right_elbow', 'right_wrist']:
+                        if 'elbow' in pos2_key:
+                            body2 = self.bodies.get('right_upper_arm')
+                        else:
+                            body2 = self.bodies.get('right_forearm')
+                    elif pos2_key in ['left_knee', 'left_ankle']:
+                        if 'knee' in pos2_key:
+                            body2 = self.bodies.get('left_thigh')
+                        elif 'ankle' in pos2_key:
+                            body2 = self.bodies.get('left_shin')
+                    elif pos2_key in ['right_knee', 'right_ankle']:
+                        if 'knee' in pos2_key:
+                            body2 = self.bodies.get('right_thigh')
+                        elif 'ankle' in pos2_key:
+                            body2 = self.bodies.get('right_shin')
+                    
+                    # If we found both bodies, apply restoring forces
+                    if body1 and body2 and body1 != body2:
+                        # Calculate direction from pos2 to pos1
+                        if current_distance > 0.1:
+                            direction_x = dx / current_distance
+                            direction_y = dy / current_distance
+                            
+                            # Calculate excess distance
+                            excess_distance = current_distance - max_distance
+                            
+                            # Apply strong restoring force
+                            restore_force_strength = 10000.0  # Very strong to prevent stretching
+                            force_x = direction_x * excess_distance * restore_force_strength
+                            force_y = direction_y * excess_distance * restore_force_strength
+                            
+                            # Clamp forces
+                            max_force = 100000.0
+                            force_x = max(-max_force, min(max_force, force_x))
+                            force_y = max(-max_force, min(max_force, force_y))
+                            
+                            # Apply forces at center of bodies (simpler and more stable)
+                            body1.apply_force_at_local_point((force_x, force_y), (0, 0))
+                            body2.apply_force_at_local_point((-force_x, -force_y), (0, 0))
+            except (AttributeError, TypeError, ValueError, OverflowError, ZeroDivisionError) as e:
+                # Skip this connection if calculation fails
+                continue
+    
+    def _enforce_torso_rotation_limit(self):
+        """Enforce maximum rotation limit on torso (±100 degrees from initial angle)"""
+        torso_body = self.bodies.get('torso')
+        if not torso_body:
+            return
+        
+        try:
+            # Calculate current angle relative to initial angle
+            current_angle = torso_body.angle
+            angle_diff = current_angle - self.torso_initial_angle
+            
+            # Normalize angle difference to [-π, π] range
+            while angle_diff > math.pi:
+                angle_diff -= 2 * math.pi
+            while angle_diff < -math.pi:
+                angle_diff += 2 * math.pi
+            
+            # Check if rotation exceeds ±100 degrees limit
+            if abs(angle_diff) > self.torso_max_rotation:
+                # Calculate how much to rotate back
+                excess_rotation = abs(angle_diff) - self.torso_max_rotation
+                
+                # Apply restoring torque to bring it back within limits
+                # Direction opposite to excess rotation
+                if angle_diff > 0:
+                    # Rotated too far clockwise, apply counter-clockwise torque
+                    restore_torque = -excess_rotation * 50000.0  # Strong restoring torque
+                    # Clamp angle to max rotation (as failsafe)
+                    max_allowed_angle = self.torso_initial_angle + self.torso_max_rotation
+                    if torso_body.angle > max_allowed_angle:
+                        torso_body.angle = max_allowed_angle
+                else:
+                    # Rotated too far counter-clockwise, apply clockwise torque
+                    restore_torque = excess_rotation * 50000.0
+                    # Clamp angle to min rotation (as failsafe)
+                    min_allowed_angle = self.torso_initial_angle - self.torso_max_rotation
+                    if torso_body.angle < min_allowed_angle:
+                        torso_body.angle = min_allowed_angle
+                
+                # Clamp torque to prevent overflow
+                max_torque = 200000.0
+                restore_torque = max(-max_torque, min(max_torque, restore_torque))
+                
+                # Apply restoring torque
+                torso_body.torque += restore_torque
+                
+                # Also reduce angular velocity to help prevent overshooting
+                if abs(torso_body.angular_velocity) > 0.1:
+                    # Dampen angular velocity more aggressively when at limits
+                    torso_body.angular_velocity *= 0.6  # More aggressive damping
+                    
+                # If angular velocity would push past limit, clamp it
+                if angle_diff > 0 and torso_body.angular_velocity > 0:
+                    # Rotating clockwise past limit - stop or reverse
+                    torso_body.angular_velocity = min(0.0, torso_body.angular_velocity * 0.3)
+                elif angle_diff < 0 and torso_body.angular_velocity < 0:
+                    # Rotating counter-clockwise past limit - stop or reverse
+                    torso_body.angular_velocity = max(0.0, torso_body.angular_velocity * 0.3)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            # Skip if calculation fails
+            pass
+    
+    def _apply_damping(self, dt):
+        """Apply damping to all bodies - less damping for bodies with applied forces"""
+        force_applied_bodies = ['left_upper_arm', 'right_upper_arm', 'left_thigh', 'right_thigh']
+        for name, body in self.bodies.items():
+            if name == 'center_pivot':  # Skip static pivot body
+                continue
+            # Apply less damping to bodies with forces applied so they respond better
+            if name in force_applied_bodies:
+                # Lighter damping for force-applied bodies (0.98 vs 0.96)
+                body.velocity = body.velocity * (0.98 ** dt)
+                body.angular_velocity = body.angular_velocity * (0.98 ** dt)
+            else:
+                # Standard damping for other bodies
+                body.velocity = body.velocity * (self.damping ** dt)
+                body.angular_velocity = body.angular_velocity * (self.damping ** dt)
+    
+    def _apply_normalizing_forces(self, dt):
+        """
+        Apply normalizing forces to help stabilize the stick figure
+        - Reduces excessive velocity
+        - Helps restore center position for torso
+        - Adds stability to all parts
+        """
+        # Get center pivot position
+        center_pivot = self.bodies.get('center_pivot')
+        if center_pivot is None:
+            return
+        
+        center_x, center_y = center_pivot.position
+        
+        for name, body in self.bodies.items():
+            if name == 'center_pivot':  # Skip static pivot body
+                continue
+            
+            # Normalize velocities (reduce excessive movement)
+            # Extract and validate velocity components to prevent overflow
+            vel_x = float(body.velocity.x)
+            vel_y = float(body.velocity.y)
+            
+            # Check for invalid values (NaN, inf) and clamp to reasonable ranges
+            max_vel_component = 5000.0  # Maximum velocity component to prevent overflow
+            if math.isnan(vel_x) or math.isinf(vel_x) or abs(vel_x) > max_vel_component:
+                vel_x = 0.0
+                body.velocity = (0.0, body.velocity.y)
+            else:
+                vel_x = max(-max_vel_component, min(max_vel_component, vel_x))
+            
+            if math.isnan(vel_y) or math.isinf(vel_y) or abs(vel_y) > max_vel_component:
+                vel_y = 0.0
+                body.velocity = (body.velocity.x, 0.0)
+            else:
+                vel_y = max(-max_vel_component, min(max_vel_component, vel_y))
+            
+            # Calculate velocity magnitude with overflow protection
+            try:
+                vel_x_sq = vel_x * vel_x
+                vel_y_sq = vel_y * vel_y
+                # Check for overflow before sqrt - use squared max_velocity for comparison
+                max_vel_sq = self.max_velocity * self.max_velocity * 4  # Allow some headroom
+                if vel_x_sq > max_vel_sq or vel_y_sq > max_vel_sq:
+                    vel_magnitude = self.max_velocity * 2  # Force normalization
+                else:
+                    vel_magnitude = math.sqrt(vel_x_sq + vel_y_sq)
+            except (OverflowError, ValueError):
+                vel_magnitude = self.max_velocity * 2  # Force normalization on error
+            
+            # Only apply velocity damping to bodies that don't have forces directly applied
+            # Bodies with applied forces (upper arms/thighs) should respond more freely
+            force_applied_bodies = ['left_upper_arm', 'right_upper_arm', 'left_thigh', 'right_thigh']
+            apply_velocity_damping = name not in force_applied_bodies
+            
+            if vel_magnitude > self.max_velocity and apply_velocity_damping:
+                # Apply force opposite to velocity to reduce speed (only for non-force-applied bodies)
+                damping_force_scale = (vel_magnitude - self.max_velocity) / self.max_velocity
+                damping_force_x = -vel_x * self.normalizing_force_strength * damping_force_scale
+                damping_force_y = -vel_y * self.normalizing_force_strength * damping_force_scale
+                # Clamp forces to prevent overflow
+                max_force = 50000.0
+                damping_force_x = max(-max_force, min(max_force, damping_force_x))
+                damping_force_y = max(-max_force, min(max_force, damping_force_y))
+                body.apply_force_at_local_point((damping_force_x, damping_force_y), (0, 0))
+            elif name in force_applied_bodies and vel_magnitude > self.max_velocity * 2.0:
+                # For force-applied bodies, only damp if velocity gets EXTREMELY high (2x max)
+                # This prevents explosion while still allowing forces to work
+                damping_force_scale = (vel_magnitude - self.max_velocity * 2.0) / (self.max_velocity * 2.0)
+                damping_force_x = -vel_x * self.normalizing_force_strength * damping_force_scale * 0.3  # Much weaker
+                damping_force_y = -vel_y * self.normalizing_force_strength * damping_force_scale * 0.3  # Much weaker
+                max_force = 50000.0
+                damping_force_x = max(-max_force, min(max_force, damping_force_x))
+                damping_force_y = max(-max_force, min(max_force, damping_force_y))
+                body.apply_force_at_local_point((damping_force_x, damping_force_y), (0, 0))
+            
+            # Normalize angular velocity (reduce excessive rotation)
+            ang_vel = body.angular_velocity
+            # Check for invalid angular velocity
+            if math.isnan(ang_vel) or math.isinf(ang_vel):
+                ang_vel = 0.0
+                body.angular_velocity = 0.0
+            else:
+                ang_vel = float(ang_vel)
+                # Clamp angular velocity
+                max_ang_vel_abs = 100.0  # Maximum absolute angular velocity
+                if abs(ang_vel) > max_ang_vel_abs:
+                    ang_vel = max_ang_vel_abs if ang_vel > 0 else -max_ang_vel_abs
+                    body.angular_velocity = ang_vel
+            
+            if abs(ang_vel) > self.max_angular_velocity:
+                damping_torque = -ang_vel * self.normalizing_force_strength * 10.0
+                # Clamp torque to prevent overflow
+                max_torque = 50000.0
+                damping_torque = max(-max_torque, min(max_torque, damping_torque))
+                body.torque += damping_torque
+            
+            # For torso: apply restoring force to keep it centered
+            if name == 'torso':
+                try:
+                    # Calculate distance from center with overflow protection
+                    dx = float(body.position.x) - float(center_x)
+                    dy = float(body.position.y) - float(center_y)
+                    
+                    # Clamp position differences to prevent overflow
+                    max_offset = 5000.0
+                    dx = max(-max_offset, min(max_offset, dx))
+                    dy = max(-max_offset, min(max_offset, dy))
+                    
+                    # Calculate distance with overflow protection
+                    dx_sq = dx * dx
+                    dy_sq = dy * dy
+                    max_distance_sq = 1000000.0  # Max distance squared (1000 pixels)
+                    if dx_sq > max_distance_sq or dy_sq > max_distance_sq:
+                        distance = 1000.0  # Force restoration
+                    else:
+                        distance = math.sqrt(dx_sq + dy_sq)
+                    
+                    if distance > 5.0:  # Only apply if significantly off-center
+                        # Apply restoring force toward center
+                        restore_force_x = -dx * self.center_restore_force
+                        restore_force_y = -dy * self.center_restore_force
+                        # Clamp forces to prevent overflow
+                        max_restore_force = 50000.0
+                        restore_force_x = max(-max_restore_force, min(max_restore_force, restore_force_x))
+                        restore_force_y = max(-max_restore_force, min(max_restore_force, restore_force_y))
+                        body.apply_force_at_local_point((restore_force_x, restore_force_y), (0, 0))
+                except (OverflowError, ValueError, TypeError, AttributeError):
+                    # If calculation fails, skip restoration for this frame
+                    pass
+            
+            # Apply general stability forces (reduces excessive movement)
+            # BUT: Skip bodies that have forces directly applied (upper arms and thighs)
+            # so they can respond freely to the vector forces without counteraction
+            force_applied_bodies = ['left_upper_arm', 'right_upper_arm', 'left_thigh', 'right_thigh']
+            if name not in force_applied_bodies:
+                # Only apply stability forces to bodies that don't have direct forces applied
+                # Use the validated/clamped velocities
+                stability_force_x = -vel_x * self.normalizing_force_strength * 0.05  # Reduced from 0.1
+                stability_force_y = -vel_y * self.normalizing_force_strength * 0.05  # Reduced from 0.1
+                # Clamp stability forces to prevent overflow
+                max_stability_force = 10000.0
+                stability_force_x = max(-max_stability_force, min(max_stability_force, stability_force_x))
+                stability_force_y = max(-max_stability_force, min(max_stability_force, stability_force_y))
+                body.apply_force_at_local_point((stability_force_x, stability_force_y), (0, 0))
+    
+    def _set_initial_pose(self):
+        """Set initial pose - positions should already be set, just ensure angles are correct"""
+        # Bodies should already be positioned correctly during construction
+        # Just ensure angles are set for a natural pose
+        
+        # Arms hanging down
+        left_arm_body = self.bodies.get('left_upper_arm')
+        if left_arm_body:
+            left_arm_body.angle = math.radians(135)  # Down-left
+        
+        right_arm_body = self.bodies.get('right_upper_arm')
+        if right_arm_body:
+            right_arm_body.angle = math.radians(45)  # Down-right
+        
+        # Forearms extend from upper arms
+        left_forearm_body = self.bodies.get('left_forearm')
+        if left_forearm_body:
+            left_forearm_body.angle = math.radians(135)
+        
+        right_forearm_body = self.bodies.get('right_forearm')
+        if right_forearm_body:
+            right_forearm_body.angle = math.radians(45)
+        
+        # Legs already positioned, angles already set during construction
+    
+    def _apply_scale(self, value):
+        """Apply scale to a value"""
+        return value * self.scale
+    
     def set_position(self, x, y):
-        """Set the position of the stick figure"""
+        """Set the position of the stick figure (moves the torso/center)"""
         self.x = x
         self.y = y
+        # Update torso position (will cascade through joints)
+        torso_body = self.bodies['torso']
+        current_torso_y = torso_body.position.y
+        torso_body.position = (x, current_torso_y)
     
     def set_scale(self, scale):
-        """Set the scale of the stick figure"""
+        """Set the scale of the stick figure (requires rebuilding)"""
         self.scale = scale
+        # Would need to rebuild physics structure - for now just update visual scale
     
     def set_color(self, color):
         """Set the color of the stick figure"""
@@ -142,258 +956,453 @@ class StickFigure:
         """Enable or disable acceleration visualization"""
         self.show_accelerations = show
     
-    def _apply_scale(self, value):
-        """Apply scale to a value"""
-        return value * self.scale
-    
-    def _deg_to_rad(self, degrees):
-        """Convert degrees to radians"""
-        return math.radians(degrees)
-    
-    def _calculate_joint_position(self, start_x, start_y, length, angle_deg, lift_deg=0):
+    def set_force(self, limb, force):
         """
-        Calculate end position of a limb segment in 2D
+        Set target force for a limb (for sensor integration)
+        Forces are applied to upper arms and thighs
         
         Args:
-            start_x, start_y: Starting position
-            length: Length of segment
-            angle_deg: Horizontal rotation (0 = right, 180 = left)
-            lift_deg: Vertical tilt (0 = horizontal, 90 = down, -90 = up)
-        
-        Returns:
-            (end_x, end_y) tuple
+            limb: 'left_upper_arm', 'right_upper_arm', 'left_upper_leg', 'right_upper_leg'
+            force: Tuple of (fx, fy, torque) in physics units
         """
-        # Scale the length
-        scaled_length = self._apply_scale(length)
+        if limb == 'left_upper_arm':
+            self.left_upper_arm_target_force = force
+        elif limb == 'right_upper_arm':
+            self.right_upper_arm_target_force = force
+        elif limb == 'left_upper_leg':
+            self.left_upper_leg_target_force = force
+        elif limb == 'right_upper_leg':
+            self.right_upper_leg_target_force = force
+    
+    def set_force_from_sensor(self, limb, accel_xyz, gyro_xyz=None):
+        """
+        Set force from sensor data (accelerometer + optional gyroscope)
         
-        # Convert angles to radians
-        angle_rad = self._deg_to_rad(angle_deg)
-        lift_rad = self._deg_to_rad(lift_deg)
+        Args:
+            limb: 'left_upper_arm', 'right_upper_arm', 'left_upper_leg', 'right_upper_leg'
+            accel_xyz: (ax, ay, az) acceleration in m/s^2 or sensor units
+            gyro_xyz: (gx, gy, gz) angular velocity in rad/s (optional, used for torque)
+        """
+        # Convert accelerometer data to forces
+        fx = accel_xyz[0] * self.force_scale
+        fy = accel_xyz[1] * self.force_scale
+        torque = 0.0
         
-        # Simple 2D projection:
-        # - angle_deg controls horizontal direction (left/right)
-        # - lift_deg controls vertical direction (up/down)
-        # 
-        # Project the 3D direction onto 2D:
-        # X: horizontal component from angle, scaled by how horizontal the limb is
-        # Y: vertical component from lift
+        # Convert gyroscope data to torque if provided
+        if gyro_xyz is not None:
+            # Use z-component for 2D rotation (around z-axis)
+            torque = gyro_xyz[2] * self.force_scale * 0.1
         
-        # Horizontal component: cos(angle) gives left/right, scaled by cos(lift) for horizontal tilt
-        x_offset = scaled_length * math.cos(angle_rad) * math.cos(lift_rad)
+        self.set_force(limb, (fx, fy, torque))
+    
+    def _generate_random_forces(self):
+        """Generate random target forces for testing"""
+        current_time = time.time() * 1000
         
-        # Vertical component: sin(lift) gives up/down
-        y_offset = scaled_length * math.sin(lift_rad)
+        if current_time - self.last_random_update > self.random_update_interval:
+            if random.random() < self.random_force_change_rate:
+                self.left_upper_arm_target_force = (
+                    random.uniform(-self.random_force_strength, self.random_force_strength),
+                    random.uniform(-self.random_force_strength, self.random_force_strength),
+                    random.uniform(-self.random_force_strength * 0.3, self.random_force_strength * 0.3)
+                )
+            
+            if random.random() < self.random_force_change_rate:
+                self.right_upper_arm_target_force = (
+                    random.uniform(-self.random_force_strength, self.random_force_strength),
+                    random.uniform(-self.random_force_strength, self.random_force_strength),
+                    random.uniform(-self.random_force_strength * 0.3, self.random_force_strength * 0.3)
+                )
+            
+            if random.random() < self.random_force_change_rate:
+                self.left_upper_leg_target_force = (
+                    random.uniform(-self.random_force_strength, self.random_force_strength),
+                    random.uniform(-self.random_force_strength, self.random_force_strength),
+                    random.uniform(-self.random_force_strength * 0.3, self.random_force_strength * 0.3)
+                )
+            
+            if random.random() < self.random_force_change_rate:
+                self.right_upper_leg_target_force = (
+                    random.uniform(-self.random_force_strength, self.random_force_strength),
+                    random.uniform(-self.random_force_strength, self.random_force_strength),
+                    random.uniform(-self.random_force_strength * 0.3, self.random_force_strength * 0.3)
+                )
+            
+            self.last_random_update = current_time
+    
+    def _lerp_tuple(self, a, b, t):
+        """Linear interpolation between two tuples"""
+        return tuple(a[i] + (b[i] - a[i]) * t for i in range(len(a)))
+    
+    def _smooth_forces(self, dt):
+        """Smoothly interpolate current forces toward target forces"""
+        interp_factor = 1.0 - math.exp(-self.force_interpolation_speed * dt)
         
-        return (start_x + x_offset, start_y + y_offset)
+        self.left_upper_arm_force = self._lerp_tuple(
+            self.left_upper_arm_force,
+            self.left_upper_arm_target_force,
+            interp_factor
+        )
+        self.right_upper_arm_force = self._lerp_tuple(
+            self.right_upper_arm_force,
+            self.right_upper_arm_target_force,
+            interp_factor
+        )
+        self.left_upper_leg_force = self._lerp_tuple(
+            self.left_upper_leg_force,
+            self.left_upper_leg_target_force,
+            interp_factor
+        )
+        self.right_upper_leg_force = self._lerp_tuple(
+            self.right_upper_leg_force,
+            self.right_upper_leg_target_force,
+            interp_factor
+        )
+    
+    def update(self, dt):
+        """
+        Update the physics simulation
+        
+        Args:
+            dt: Delta time in seconds
+        """
+        # Update gravity to match parameter (allows dynamic adjustment)
+        self.space.gravity = (0, self.gravity_strength)
+        
+        # Generate random forces if enabled
+        if self.use_random_forces:
+            self._generate_random_forces()
+        
+        # Smoothly interpolate forces toward targets
+        self._smooth_forces(dt)
+        
+        # Apply forces to upper arms and thighs (where sensors will be)
+        # Use .get() with fallback to avoid errors if bodies are missing
+        left_arm_body = self.bodies.get('left_upper_arm')
+        if left_arm_body:
+            left_arm_body.apply_force_at_local_point(
+                (self.left_upper_arm_force[0], self.left_upper_arm_force[1]),
+                (0, 0)  # Apply at center of body
+            )
+            left_arm_body.torque += self.left_upper_arm_force[2]
+        
+        right_arm_body = self.bodies.get('right_upper_arm')
+        if right_arm_body:
+            right_arm_body.apply_force_at_local_point(
+                (self.right_upper_arm_force[0], self.right_upper_arm_force[1]),
+                (0, 0)
+            )
+            right_arm_body.torque += self.right_upper_arm_force[2]
+        
+        left_leg_body = self.bodies.get('left_thigh')
+        if left_leg_body:
+            left_leg_body.apply_force_at_local_point(
+                (self.left_upper_leg_force[0], self.left_upper_leg_force[1]),
+                (0, 0)
+            )
+            left_leg_body.torque += self.left_upper_leg_force[2]
+        
+        right_leg_body = self.bodies.get('right_thigh')
+        if right_leg_body:
+            right_leg_body.apply_force_at_local_point(
+                (self.right_upper_leg_force[0], self.right_upper_leg_force[1]),
+                (0, 0)
+            )
+            right_leg_body.torque += self.right_upper_leg_force[2]
+        
+        # Enforce maximum distances between connected parts (prevents "silly string" effect)
+        self._enforce_max_distances()
+        
+        # Apply normalizing forces to all bodies (helps stabilize and keep things centered)
+        if self.apply_normalizing_forces:
+            self._apply_normalizing_forces(dt)
+        
+        # Enforce rotation limits on torso (max ±100 degrees)
+        self._enforce_torso_rotation_limit()
+        
+        # Apply damping to all bodies
+        self._apply_damping(dt)
+        
+        # Step the physics simulation
+        self.space.step(dt)
+    
+    def _vec_to_tuple(self, vec):
+        """Convert pymunk Vec2d to tuple of floats"""
+        if vec is None:
+            return (0.0, 0.0)
+        try:
+            # Handle pymunk Vec2d
+            if hasattr(vec, 'x') and hasattr(vec, 'y'):
+                return (float(vec.x), float(vec.y))
+            # If it's already a tuple or list
+            elif hasattr(vec, '__len__') and len(vec) >= 2:
+                return (float(vec[0]), float(vec[1]))
+            else:
+                return (0.0, 0.0)
+        except (AttributeError, TypeError, ValueError) as e:
+            # Fallback to default if conversion fails
+            print(f"Warning: Failed to convert vec to tuple: {vec}, error: {e}")
+            return (0.0, 0.0)
     
     def get_joint_positions(self):
         """
-        Calculate all joint positions based on current angles
+        Get current positions of all joints based on physics bodies
         Returns a dictionary with all joint coordinates
         """
         positions = {}
         
-        # Head center
-        head_y = self.y + self._apply_scale(self.head_radius)
-        positions['head_center'] = (self.x, head_y)
+        # Get scaled limb lengths
+        scaled_torso = self._apply_scale(self.torso_length)
+        scaled_shoulder_width = self._apply_scale(self.shoulder_width / 2)
         
-        # Neck (top of torso)
-        neck_y = head_y + self._apply_scale(self.head_radius)
-        positions['neck'] = (self.x, neck_y)
+        # Head - safely convert Vec2d to tuple
+        head_body = self.bodies.get('head')
+        if head_body:
+            positions['head_center'] = self._vec_to_tuple(head_body.position)
+        else:
+            positions['head_center'] = (self.x, self.y)
         
-        # Shoulders (center of shoulder line)
-        shoulder_y = neck_y + self._apply_scale(self.torso_length * 0.3)
-        positions['shoulder_center'] = (self.x, shoulder_y)
+        # Neck (top of torso, where head connects)
+        torso_body = self.bodies.get('torso')
+        if torso_body:
+            neck_top = torso_body.local_to_world((0, -scaled_torso/2))
+            positions['neck'] = self._vec_to_tuple(neck_top)
+        else:
+            positions['neck'] = (self.x, self.y)
         
-        # Left and right shoulders
-        shoulder_half_width = self._apply_scale(self.shoulder_width / 2)
-        positions['left_shoulder'] = (self.x - shoulder_half_width, shoulder_y)
-        positions['right_shoulder'] = (self.x + shoulder_half_width, shoulder_y)
+        # Shoulders (left and right shoulder positions - from triangle base corners)
+        if torso_body:
+            # Get shoulder positions from triangle base corners (top vertices)
+            scaled_shoulder_width = self._apply_scale(self.shoulder_width)
+            left_shoulder_local = (-scaled_shoulder_width/2, -scaled_torso/2)  # Left shoulder corner of triangle
+            right_shoulder_local = (scaled_shoulder_width/2, -scaled_torso/2)  # Right shoulder corner of triangle
+            left_shoulder_pos = torso_body.local_to_world(left_shoulder_local)
+            right_shoulder_pos = torso_body.local_to_world(right_shoulder_local)
+            positions['left_shoulder'] = self._vec_to_tuple(left_shoulder_pos)
+            positions['right_shoulder'] = self._vec_to_tuple(right_shoulder_pos)
+            # Shoulder center is midpoint of triangle base
+            shoulder_center_local = (0, -scaled_torso/2)
+            shoulder_center_pos = torso_body.local_to_world(shoulder_center_local)
+            positions['shoulder_center'] = self._vec_to_tuple(shoulder_center_pos)
+        else:
+            # Fallback if torso body doesn't exist
+            scaled_shoulder_width = self._apply_scale(self.shoulder_width)
+            positions['left_shoulder'] = (self.x - scaled_shoulder_width/2, self.y - scaled_torso/2)
+            positions['right_shoulder'] = (self.x + scaled_shoulder_width/2, self.y - scaled_torso/2)
+            positions['shoulder_center'] = (self.x, self.y - scaled_torso/2)
         
         # Waist (bottom of torso)
-        waist_y = shoulder_y + self._apply_scale(self.torso_length * 0.7)
-        positions['waist'] = (self.x, waist_y)
+        if torso_body:
+            waist_pos = torso_body.local_to_world((0, scaled_torso/2))
+            positions['waist'] = self._vec_to_tuple(waist_pos)
+        else:
+            positions['waist'] = (self.x, self.y + scaled_torso)
         
-        # Left hip (slightly left of center)
-        hip_offset = self._apply_scale(8)
-        positions['left_hip'] = (self.x - hip_offset, waist_y)
-        positions['right_hip'] = (self.x + hip_offset, waist_y)
+        # Elbows (end of upper arms)
+        left_arm_body = self.bodies.get('left_upper_arm')
+        if left_arm_body:
+            left_arm_length = self.limb_lengths.get('left_upper_arm', self._apply_scale(self.upper_arm_length))
+            left_elbow_pos = left_arm_body.local_to_world((left_arm_length/2, 0))
+            positions['left_elbow'] = self._vec_to_tuple(left_elbow_pos)
+        else:
+            positions['left_elbow'] = positions.get('left_shoulder', (self.x, self.y))
         
-        # Left arm joints
-        left_elbow = self._calculate_joint_position(
-            positions['left_shoulder'][0],
-            positions['left_shoulder'][1],
-            self.upper_arm_length,
-            self.left_shoulder_angle,
-            self.left_shoulder_lift
-        )
-        positions['left_elbow'] = left_elbow
+        right_arm_body = self.bodies.get('right_upper_arm')
+        if right_arm_body:
+            right_arm_length = self.limb_lengths.get('right_upper_arm', self._apply_scale(self.upper_arm_length))
+            right_elbow_pos = right_arm_body.local_to_world((right_arm_length/2, 0))
+            positions['right_elbow'] = self._vec_to_tuple(right_elbow_pos)
+        else:
+            positions['right_elbow'] = positions.get('right_shoulder', (self.x, self.y))
         
-        # Calculate forearm direction relative to upper arm
-        # Elbow angle bends the forearm relative to the upper arm direction
-        forearm_angle = self.left_shoulder_angle
-        forearm_lift = self.left_shoulder_lift + self.left_elbow_angle  # Elbow bend adds to lift angle
-        left_wrist = self._calculate_joint_position(
-            left_elbow[0],
-            left_elbow[1],
-            self.forearm_length,
-            forearm_angle,
-            forearm_lift
-        )
-        positions['left_wrist'] = left_wrist
+        # Wrists (end of forearms)
+        left_forearm_body = self.bodies.get('left_forearm')
+        if left_forearm_body:
+            left_forearm_length = self.limb_lengths.get('left_forearm', self._apply_scale(self.forearm_length))
+            left_wrist_pos = left_forearm_body.local_to_world((left_forearm_length/2, 0))
+            positions['left_wrist'] = self._vec_to_tuple(left_wrist_pos)
+        else:
+            positions['left_wrist'] = positions.get('left_elbow', (self.x, self.y))
         
-        # Right arm joints
-        right_elbow = self._calculate_joint_position(
-            positions['right_shoulder'][0],
-            positions['right_shoulder'][1],
-            self.upper_arm_length,
-            self.right_shoulder_angle,
-            self.right_shoulder_lift
-        )
-        positions['right_elbow'] = right_elbow
+        right_forearm_body = self.bodies.get('right_forearm')
+        if right_forearm_body:
+            right_forearm_length = self.limb_lengths.get('right_forearm', self._apply_scale(self.forearm_length))
+            right_wrist_pos = right_forearm_body.local_to_world((right_forearm_length/2, 0))
+            positions['right_wrist'] = self._vec_to_tuple(right_wrist_pos)
+        else:
+            positions['right_wrist'] = positions.get('right_elbow', (self.x, self.y))
         
-        forearm_angle = self.right_shoulder_angle
-        forearm_lift = self.right_shoulder_lift + self.right_elbow_angle
-        right_wrist = self._calculate_joint_position(
-            right_elbow[0],
-            right_elbow[1],
-            self.forearm_length,
-            forearm_angle,
-            forearm_lift
-        )
-        positions['right_wrist'] = right_wrist
+        # Hips (connection point - triangle apex where both thighs attach)
+        if torso_body:
+            # Both thighs attach to triangle apex (bottom point)
+            hip_apex_local = (0, scaled_torso/2)  # Triangle apex
+            hip_apex_pos = torso_body.local_to_world(hip_apex_local)
+            # Use same point for both hips (they share the apex)
+            positions['left_hip'] = self._vec_to_tuple(hip_apex_pos)
+            positions['right_hip'] = self._vec_to_tuple(hip_apex_pos)
+        else:
+            # Fallback if torso body doesn't exist
+            positions['left_hip'] = (self.x, self.y + scaled_torso/2)
+            positions['right_hip'] = (self.x, self.y + scaled_torso/2)
         
-        # Left leg joints
-        left_knee = self._calculate_joint_position(
-            positions['left_hip'][0],
-            positions['left_hip'][1],
-            self.thigh_length,
-            self.left_hip_angle,
-            self.left_hip_lift
-        )
-        positions['left_knee'] = left_knee
+        # Knees (end of thighs)
+        left_thigh_body = self.bodies.get('left_thigh')
+        if left_thigh_body:
+            left_thigh_length = self.limb_lengths.get('left_thigh', self._apply_scale(self.thigh_length))
+            left_knee_pos = left_thigh_body.local_to_world((left_thigh_length/2, 0))
+            positions['left_knee'] = self._vec_to_tuple(left_knee_pos)
+        else:
+            positions['left_knee'] = positions.get('left_hip', (self.x, self.y))
         
-        shin_angle = self.left_hip_angle
-        shin_lift = self.left_hip_lift + self.left_knee_angle  # Knee bend adds to lift angle
-        left_ankle = self._calculate_joint_position(
-            left_knee[0],
-            left_knee[1],
-            self.shin_length,
-            shin_angle,
-            shin_lift
-        )
-        positions['left_ankle'] = left_ankle
+        right_thigh_body = self.bodies.get('right_thigh')
+        if right_thigh_body:
+            right_thigh_length = self.limb_lengths.get('right_thigh', self._apply_scale(self.thigh_length))
+            right_knee_pos = right_thigh_body.local_to_world((right_thigh_length/2, 0))
+            positions['right_knee'] = self._vec_to_tuple(right_knee_pos)
+        else:
+            positions['right_knee'] = positions.get('right_hip', (self.x, self.y))
         
-        # Right leg joints
-        right_knee = self._calculate_joint_position(
-            positions['right_hip'][0],
-            positions['right_hip'][1],
-            self.thigh_length,
-            self.right_hip_angle,
-            self.right_hip_lift
-        )
-        positions['right_knee'] = right_knee
+        # Ankles (end of shins)
+        left_shin_body = self.bodies.get('left_shin')
+        if left_shin_body:
+            left_shin_length = self.limb_lengths.get('left_shin', self._apply_scale(self.shin_length))
+            left_ankle_pos = left_shin_body.local_to_world((left_shin_length/2, 0))
+            positions['left_ankle'] = self._vec_to_tuple(left_ankle_pos)
+        else:
+            positions['left_ankle'] = positions.get('left_knee', (self.x, self.y))
         
-        shin_angle = self.right_hip_angle
-        shin_lift = self.right_hip_lift + self.right_knee_angle
-        right_ankle = self._calculate_joint_position(
-            right_knee[0],
-            right_knee[1],
-            self.shin_length,
-            shin_angle,
-            shin_lift
-        )
-        positions['right_ankle'] = right_ankle
+        right_shin_body = self.bodies.get('right_shin')
+        if right_shin_body:
+            right_shin_length = self.limb_lengths.get('right_shin', self._apply_scale(self.shin_length))
+            right_ankle_pos = right_shin_body.local_to_world((right_shin_length/2, 0))
+            positions['right_ankle'] = self._vec_to_tuple(right_ankle_pos)
+        else:
+            positions['right_ankle'] = positions.get('right_knee', (self.x, self.y))
         
         return positions
     
     def draw(self, surface):
-        """
-        Draw the stick figure on the given surface
+        """Draw the stick figure on the given surface"""
+        try:
+            positions = self.get_joint_positions()
+        except Exception as e:
+            print(f"Error getting joint positions: {e}")
+            return  # Skip drawing if positions can't be calculated
         
-        Args:
-            surface: Pygame surface to draw on
-        """
-        positions = self.get_joint_positions()
+        # Draw head (circle) - with safety checks
+        try:
+            head_center = positions.get('head_center', (self.x, self.y))
+            # Ensure head_center is a valid tuple of numbers
+            if not isinstance(head_center, (tuple, list)) or len(head_center) < 2:
+                head_center = (float(head_center[0]) if hasattr(head_center, '__getitem__') else self.x, 
+                              float(head_center[1]) if hasattr(head_center, '__getitem__') else self.y)
+            else:
+                head_center = (float(head_center[0]), float(head_center[1]))
+            
+            # Draw head with visual radius (not collision radius, which is larger)
+            head_radius = self._apply_scale(self.head_radius)
+            pygame.draw.circle(surface, self.color,
+                              (int(head_center[0]), int(head_center[1])),
+                              int(head_radius), self.line_width)
+            # Optional: Draw collision buffer zone in a different color for debugging
+            # collision_radius = head_radius + self._apply_scale(self.collision_buffer_zone)
+            # pygame.draw.circle(surface, (100, 100, 100, 50),  # Semi-transparent gray
+            #                   (int(head_center[0]), int(head_center[1])),
+            #                   int(collision_radius), 1)
+        except Exception as e:
+            print(f"Error drawing head: {e}, head_center: {head_center if 'head_center' in locals() else 'unknown'}")
         
-        # Draw head (circle)
-        head_center = positions['head_center']
-        head_radius = self._apply_scale(self.head_radius)
-        pygame.draw.circle(surface, self.color, 
-                          (int(head_center[0]), int(head_center[1])), 
-                          int(head_radius), self.line_width)
+        # Calculate visual thickness for drawing
+        visual_thickness = max(self.line_width, int(self._apply_scale(self.limb_thickness * 0.5)))
         
-        # Draw torso (vertical line from neck to waist)
-        pygame.draw.line(surface, self.color,
-                        positions['neck'],
-                        positions['waist'],
-                        self.line_width)
+        # Draw torso as a triangle (T-shaped body)
+        # Calculate triangle vertices in world coordinates
+        torso_body = self.bodies.get('torso')
+        if torso_body and 'neck' in positions and 'waist' in positions:
+            try:
+                # Get triangle vertices from torso body shape
+                # Triangle: wide base at top (shoulders), narrows to point at bottom (hips)
+                scaled_torso = self._apply_scale(self.torso_length)
+                scaled_shoulder_width = self._apply_scale(self.shoulder_width)
+                
+                # Local triangle vertices (same as in physics shape - inverted isosceles)
+                local_vertices = [
+                    (-scaled_shoulder_width/2, -scaled_torso/2),  # Left shoulder (top left corner)
+                    (scaled_shoulder_width/2, -scaled_torso/2),  # Right shoulder (top right corner)
+                    (0, scaled_torso/2),  # Hips (bottom point/apex)
+                ]
+                
+                # Transform to world coordinates
+                world_vertices = []
+                for local_vertex in local_vertices:
+                    world_vertex = torso_body.local_to_world(local_vertex)
+                    world_vertices.append((int(world_vertex.x), int(world_vertex.y)))
+                
+                # Draw filled triangle
+                pygame.draw.polygon(surface, self.color, world_vertices)
+                # Draw triangle outline
+                pygame.draw.polygon(surface, self.color, world_vertices, visual_thickness // 2)
+            except (AttributeError, TypeError, ValueError) as e:
+                # Fallback to line drawing if triangle calculation fails
+                pygame.draw.line(surface, self.color,
+                                positions['neck'],
+                                positions['waist'],
+                                visual_thickness)
+        else:
+            # Fallback to line drawing if body not available
+            pygame.draw.line(surface, self.color,
+                            positions.get('neck', (self.x, self.y)),
+                            positions.get('waist', (self.x, self.y + self._apply_scale(self.torso_length))),
+                            visual_thickness)
         
-        # Draw shoulders (horizontal line)
-        pygame.draw.line(surface, self.color,
-                        positions['left_shoulder'],
-                        positions['right_shoulder'],
-                        self.line_width)
-        
-        # Draw left arm (upper arm + forearm)
+        # No separate shoulder line - triangle base IS the shoulders
+        # Draw left arm (upper arm + forearm) with thickness
         pygame.draw.line(surface, self.color,
                         positions['left_shoulder'],
                         positions['left_elbow'],
-                        self.line_width)
+                        visual_thickness)
         pygame.draw.line(surface, self.color,
                         positions['left_elbow'],
                         positions['left_wrist'],
-                        self.line_width)
+                        visual_thickness)
         
-        # Draw right arm (upper arm + forearm)
+        # Draw right arm (upper arm + forearm) with thickness
         pygame.draw.line(surface, self.color,
                         positions['right_shoulder'],
                         positions['right_elbow'],
-                        self.line_width)
+                        visual_thickness)
         pygame.draw.line(surface, self.color,
                         positions['right_elbow'],
                         positions['right_wrist'],
-                        self.line_width)
+                        visual_thickness)
         
-        # Draw left leg (thigh + shin)
+        # Draw left leg (thigh + shin) with thickness
         pygame.draw.line(surface, self.color,
                         positions['left_hip'],
                         positions['left_knee'],
-                        self.line_width)
+                        visual_thickness)
         pygame.draw.line(surface, self.color,
                         positions['left_knee'],
                         positions['left_ankle'],
-                        self.line_width)
+                        visual_thickness)
         
-        # Draw right leg (thigh + shin)
+        # Draw right leg (thigh + shin) with thickness
         pygame.draw.line(surface, self.color,
                         positions['right_hip'],
                         positions['right_knee'],
-                        self.line_width)
+                        visual_thickness)
         pygame.draw.line(surface, self.color,
                         positions['right_knee'],
                         positions['right_ankle'],
-                        self.line_width)
+                        visual_thickness)
         
         # Draw acceleration visualizations if enabled
         if self.show_accelerations:
             self._draw_accelerations(surface, positions)
-        
-        # Optional: Draw joint points for debugging
-        # Uncomment to visualize joints
-        # for joint_name, pos in positions.items():
-        #     pygame.draw.circle(surface, (255, 0, 0), 
-        #                       (int(pos[0]), int(pos[1])), 3)
     
     def _draw_accelerations(self, surface, positions):
-        """
-        Draw acceleration visualization: circles at acceleration points and arrows for 3D accelerations
-        
-        Args:
-            surface: Pygame surface to draw on
-            positions: Dictionary of joint positions
-        """
-        # Calculate midpoints of upper arms and upper legs (where accelerations are applied)
+        """Draw acceleration visualization: circles at force points and arrows for 3D forces"""
+        # Calculate midpoints of upper arms and upper legs (where forces are applied)
         left_upper_arm_mid = (
             (positions['left_shoulder'][0] + positions['left_elbow'][0]) / 2,
             (positions['left_shoulder'][1] + positions['left_elbow'][1]) / 2
@@ -411,366 +1420,103 @@ class StickFigure:
             (positions['right_hip'][1] + positions['right_knee'][1]) / 2
         )
         
-        # Draw circles and arrows for each acceleration point
-        self._draw_accel_point(surface, left_upper_arm_mid, self.left_upper_arm_accel)
-        self._draw_accel_point(surface, right_upper_arm_mid, self.right_upper_arm_accel)
-        self._draw_accel_point(surface, left_upper_leg_mid, self.left_upper_leg_accel)
-        self._draw_accel_point(surface, right_upper_leg_mid, self.right_upper_leg_accel)
+        # Draw circles and arrows for each force point
+        # Convert forces to acceleration-like visualization
+        self._draw_force_point(surface, left_upper_arm_mid, self.left_upper_arm_force)
+        self._draw_force_point(surface, right_upper_arm_mid, self.right_upper_arm_force)
+        self._draw_force_point(surface, left_upper_leg_mid, self.left_upper_leg_force)
+        self._draw_force_point(surface, right_upper_leg_mid, self.right_upper_leg_force)
     
-    def _draw_accel_point(self, surface, position, accel):
-        """
-        Draw a circle at the acceleration point and arrows for 3D acceleration
-        
-        Args:
-            surface: Pygame surface to draw on
-            position: (x, y) position of the acceleration point
-            accel: (x_accel, y_accel, z_accel) tuple
-        """
+    def _draw_force_point(self, surface, position, force):
+        """Draw a circle at the force point and arrows for 3D force"""
         x, y = int(position[0]), int(position[1])
-        accel_x, accel_y, accel_z = accel
+        fx, fy, torque = force
         
-        # Draw circle at acceleration point
+        # Draw circle at force point
         circle_radius = int(self._apply_scale(self.accel_circle_radius))
         pygame.draw.circle(surface, self.accel_circle_color, (x, y), circle_radius, 2)
         
-        # Calculate arrow length based on acceleration magnitude
-        accel_magnitude = math.sqrt(accel_x**2 + accel_y**2 + accel_z**2)
-        if accel_magnitude < 0.1:  # Don't draw if acceleration is too small
+        # Calculate force magnitude
+        force_magnitude = math.sqrt(fx**2 + fy**2 + abs(torque))
+        if force_magnitude < 1.0:  # Don't draw if force is too small
             return
         
         # Scale arrow length
-        base_length = self._apply_scale(20)  # Base arrow length
-        arrow_length = base_length * accel_magnitude / 50.0 * self.accel_arrow_length_scale
-        arrow_length = max(5, min(arrow_length, base_length * 3))  # Clamp arrow length
+        base_length = self._apply_scale(20)
+        arrow_length = base_length * force_magnitude / (self.random_force_strength * 0.5) * self.accel_arrow_length_scale
+        arrow_length = max(5, min(arrow_length, base_length * 3))
         
         # Draw X component arrow (horizontal, red)
-        if abs(accel_x) > 0.1:
-            x_arrow_length = arrow_length * abs(accel_x) / accel_magnitude
-            x_direction = 1 if accel_x > 0 else -1
+        if abs(fx) > 1.0:
+            x_arrow_length = arrow_length * abs(fx) / force_magnitude
+            x_direction = 1 if fx > 0 else -1
             end_x = x + x_arrow_length * x_direction
             self._draw_arrow(surface, (x, y), (end_x, y), (255, 100, 100), 2)
         
         # Draw Y component arrow (vertical, green)
-        if abs(accel_y) > 0.1:
-            y_arrow_length = arrow_length * abs(accel_y) / accel_magnitude
-            y_direction = 1 if accel_y > 0 else -1
+        if abs(fy) > 1.0:
+            y_arrow_length = arrow_length * abs(fy) / force_magnitude
+            y_direction = 1 if fy > 0 else -1
             end_y = y + y_arrow_length * y_direction
             self._draw_arrow(surface, (x, y), (x, end_y), (100, 255, 100), 2)
         
-        # Draw Z component arrow (diagonal/perpendicular, blue)
-        # Z represents depth, so we'll show it as a diagonal arrow
-        if abs(accel_z) > 0.1:
-            z_arrow_length = arrow_length * abs(accel_z) / accel_magnitude
-            z_direction = 1 if accel_z > 0 else -1
-            # Show Z as a diagonal arrow (45 degrees)
-            end_x = x + z_arrow_length * z_direction * math.cos(math.pi / 4)
-            end_y = y + z_arrow_length * z_direction * math.sin(math.pi / 4)
+        # Draw torque arrow (diagonal/perpendicular, blue)
+        if abs(torque) > 1.0:
+            torque_arrow_length = arrow_length * abs(torque) / force_magnitude
+            torque_direction = 1 if torque > 0 else -1
+            end_x = x + torque_arrow_length * torque_direction * math.cos(math.pi / 4)
+            end_y = y + torque_arrow_length * torque_direction * math.sin(math.pi / 4)
             self._draw_arrow(surface, (x, y), (end_x, end_y), (100, 100, 255), 2)
     
     def _draw_arrow(self, surface, start, end, color, width):
-        """
-        Draw an arrow from start to end
-        
-        Args:
-            surface: Pygame surface to draw on
-            start: (x, y) start position
-            end: (x, y) end position
-            color: RGB color tuple
-            width: Line width
-        """
-        # Draw the arrow line
+        """Draw an arrow from start to end"""
         pygame.draw.line(surface, color, start, end, width)
         
-        # Calculate arrowhead
         dx = end[0] - start[0]
         dy = end[1] - start[1]
         angle = math.atan2(dy, dx)
         
-        # Arrowhead size
         arrowhead_length = 8
-        arrowhead_angle = math.pi / 6  # 30 degrees
+        arrowhead_angle = math.pi / 6
         
-        # Calculate arrowhead points
         arrowhead_x1 = end[0] - arrowhead_length * math.cos(angle - arrowhead_angle)
         arrowhead_y1 = end[1] - arrowhead_length * math.sin(angle - arrowhead_angle)
         arrowhead_x2 = end[0] - arrowhead_length * math.cos(angle + arrowhead_angle)
         arrowhead_y2 = end[1] - arrowhead_length * math.sin(angle + arrowhead_angle)
         
-        # Draw arrowhead
         pygame.draw.polygon(surface, color, [
             end,
             (arrowhead_x1, arrowhead_y1),
             (arrowhead_x2, arrowhead_y2)
         ])
     
-    def set_pose(self, **kwargs):
-        """
-        Set multiple joint angles at once
-        
-        Example:
-            figure.set_pose(
-                left_shoulder_angle=45,
-                right_shoulder_angle=-45,
-                left_elbow_angle=90,
-                right_elbow_angle=90
-            )
-        """
-        for key, value in kwargs.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-    
-    def reset_pose(self):
-        """Reset all angles to default (standing pose)"""
-        self.head_angle = 0
-        self.torso_angle = 0
-        
-        self.left_shoulder_angle = 0
-        self.left_shoulder_lift = 0
-        self.left_elbow_angle = 0
-        
-        self.right_shoulder_angle = 0
-        self.right_shoulder_lift = 0
-        self.right_elbow_angle = 0
-        
-        self.left_hip_angle = 0
-        self.left_hip_lift = 0
-        self.left_knee_angle = 0
-        
-        self.right_hip_angle = 0
-        self.right_hip_lift = 0
-        self.right_knee_angle = 0
-        
-        # Reset velocities
-        self.left_shoulder_vel = 0.0
-        self.left_shoulder_lift_vel = 0.0
-        self.right_shoulder_vel = 0.0
-        self.right_shoulder_lift_vel = 0.0
-        self.left_hip_vel = 0.0
-        self.left_hip_lift_vel = 0.0
-        self.right_hip_vel = 0.0
-        self.right_hip_lift_vel = 0.0
-        self.left_elbow_vel = 0.0
-        self.right_elbow_vel = 0.0
-        self.left_knee_vel = 0.0
-        self.right_knee_vel = 0.0
-    
-    def set_acceleration(self, limb, accel):
-        """
-        Set target acceleration for a limb (for future sensor integration)
-        The acceleration will smoothly interpolate to this target
-        
-        Args:
-            limb: 'left_upper_arm', 'right_upper_arm', 'left_upper_leg', 'right_upper_leg'
-            accel: Tuple of (x, y, z) accelerations in degrees per second squared
-        """
-        if limb == 'left_upper_arm':
-            self.left_upper_arm_target_accel = accel
-        elif limb == 'right_upper_arm':
-            self.right_upper_arm_target_accel = accel
-        elif limb == 'left_upper_leg':
-            self.left_upper_leg_target_accel = accel
-        elif limb == 'right_upper_leg':
-            self.right_upper_leg_target_accel = accel
-    
-    def _generate_random_accelerations(self):
-        """Generate random target accelerations for smooth interpolation (will be replaced by sensor data)"""
-        current_time = time.time() * 1000  # Convert to milliseconds
-        
-        # Update random target accelerations periodically
-        if current_time - self.last_random_update > self.random_update_interval:
-            # Randomly change target accelerations (these will be smoothly interpolated to)
-            if random.random() < self.random_accel_change_rate:
-                # Left upper arm: affects shoulder angle and lift
-                self.left_upper_arm_target_accel = (
-                    random.uniform(-self.random_accel_strength, self.random_accel_strength),
-                    random.uniform(-self.random_accel_strength, self.random_accel_strength),
-                    random.uniform(-self.random_accel_strength * 0.5, self.random_accel_strength * 0.5)
-                )
+    def cleanup(self):
+        """Clean up physics resources"""
+        if self.owns_space and self.space:
+            # Remove all constraints (springs, etc.)
+            for constraint in list(self.constraints.values()):
+                try:
+                    self.space.remove(constraint)
+                except:
+                    pass
             
-            if random.random() < self.random_accel_change_rate:
-                # Right upper arm
-                self.right_upper_arm_target_accel = (
-                    random.uniform(-self.random_accel_strength, self.random_accel_strength),
-                    random.uniform(-self.random_accel_strength, self.random_accel_strength),
-                    random.uniform(-self.random_accel_strength * 0.5, self.random_accel_strength * 0.5)
-                )
+            # Remove all joints
+            for joint in list(self.joints.values()):
+                try:
+                    self.space.remove(joint)
+                except:
+                    pass
             
-            if random.random() < self.random_accel_change_rate:
-                # Left upper leg: affects hip angle and lift
-                self.left_upper_leg_target_accel = (
-                    random.uniform(-self.random_accel_strength, self.random_accel_strength),
-                    random.uniform(-self.random_accel_strength, self.random_accel_strength),
-                    random.uniform(-self.random_accel_strength * 0.5, self.random_accel_strength * 0.5)
-                )
+            # Remove all bodies and shapes from space (except static pivot)
+            for name, body in list(self.bodies.items()):
+                if name == 'center_pivot':
+                    continue  # Skip static body
+                try:
+                    for shape in body.shapes:
+                        self.space.remove(shape)
+                    self.space.remove(body)
+                except:
+                    pass
             
-            if random.random() < self.random_accel_change_rate:
-                # Right upper leg
-                self.right_upper_leg_target_accel = (
-                    random.uniform(-self.random_accel_strength, self.random_accel_strength),
-                    random.uniform(-self.random_accel_strength, self.random_accel_strength),
-                    random.uniform(-self.random_accel_strength * 0.5, self.random_accel_strength * 0.5)
-                )
-            
-            self.last_random_update = current_time
-    
-    def _lerp(self, a, b, t):
-        """Linear interpolation between two values"""
-        return a + (b - a) * t
-    
-    def _lerp_tuple(self, a, b, t):
-        """Linear interpolation between two tuples"""
-        return tuple(self._lerp(a[i], b[i], t) for i in range(len(a)))
-    
-    def _smooth_accelerations(self, dt):
-        """Smoothly interpolate current accelerations toward target accelerations"""
-        # Calculate interpolation factor based on time and speed
-        interp_factor = 1.0 - math.exp(-self.accel_interpolation_speed * dt)
-        
-        # Interpolate each acceleration toward its target
-        self.left_upper_arm_accel = self._lerp_tuple(
-            self.left_upper_arm_accel,
-            self.left_upper_arm_target_accel,
-            interp_factor
-        )
-        self.right_upper_arm_accel = self._lerp_tuple(
-            self.right_upper_arm_accel,
-            self.right_upper_arm_target_accel,
-            interp_factor
-        )
-        self.left_upper_leg_accel = self._lerp_tuple(
-            self.left_upper_leg_accel,
-            self.left_upper_leg_target_accel,
-            interp_factor
-        )
-        self.right_upper_leg_accel = self._lerp_tuple(
-            self.right_upper_leg_accel,
-            self.right_upper_leg_target_accel,
-            interp_factor
-        )
-    
-    def update(self, dt):
-        """
-        Update the stick figure based on accelerations
-        
-        Args:
-            dt: Delta time in seconds (time since last update)
-        """
-        # Generate random target accelerations if enabled
-        if self.use_random_accel:
-            self._generate_random_accelerations()
-        
-        # Smoothly interpolate accelerations toward targets
-        self._smooth_accelerations(dt)
-        
-        # Apply accelerations to left upper arm (affects shoulder)
-        # X acceleration affects horizontal rotation (shoulder_angle)
-        # Y acceleration affects vertical lift (shoulder_lift)
-        self.left_shoulder_vel += self.left_upper_arm_accel[0] * self.accel_scale * dt
-        self.left_shoulder_lift_vel += self.left_upper_arm_accel[1] * self.accel_scale * dt
-        
-        # Apply accelerations to right upper arm
-        self.right_shoulder_vel += self.right_upper_arm_accel[0] * self.accel_scale * dt
-        self.right_shoulder_lift_vel += self.right_upper_arm_accel[1] * self.accel_scale * dt
-        
-        # Apply accelerations to left upper leg (affects hip)
-        self.left_hip_vel += self.left_upper_leg_accel[0] * self.accel_scale * dt
-        self.left_hip_lift_vel += self.left_upper_leg_accel[1] * self.accel_scale * dt
-        
-        # Apply accelerations to right upper leg
-        self.right_hip_vel += self.right_upper_leg_accel[0] * self.accel_scale * dt
-        self.right_hip_lift_vel += self.right_upper_leg_accel[1] * self.accel_scale * dt
-        
-        # Apply damping to velocities
-        # Arms use normal damping
-        self.left_shoulder_vel *= self.damping
-        self.left_shoulder_lift_vel *= self.damping
-        self.right_shoulder_vel *= self.damping
-        self.right_shoulder_lift_vel *= self.damping
-        
-        # Legs use additional drag (more damping) for slower, more sluggish movement
-        self.left_hip_vel *= self.damping * self.leg_damping
-        self.left_hip_lift_vel *= self.damping * self.leg_damping
-        self.right_hip_vel *= self.damping * self.leg_damping
-        self.right_hip_lift_vel *= self.damping * self.leg_damping
-        
-        # Lower limb physics: forearms and shins lag behind upper arms and thighs due to inertia and drag
-        # This creates natural bending at elbows and knees when limbs are moving
-        
-        # Elbow physics: forearms lag behind upper arm movement
-        # When the upper arm moves up/down, the forearm should lag behind, creating a bend
-        # The target velocity is based on how fast the upper arm is moving
-        # Negative because when arm goes up (positive lift_vel), elbow should bend (positive angle)
-        left_elbow_target_vel = -self.left_shoulder_lift_vel * self.lower_limb_inertia
-        right_elbow_target_vel = -self.right_shoulder_lift_vel * self.lower_limb_inertia
-        
-        # Also respond to horizontal movement (shoulder angle velocity)
-        left_elbow_target_vel += abs(self.left_shoulder_vel) * self.lower_limb_inertia * 0.3
-        right_elbow_target_vel += abs(self.right_shoulder_vel) * self.lower_limb_inertia * 0.3
-        
-        # Interpolate elbow velocity toward target (creates lag/inertia effect)
-        response_factor = (1.0 - self.lower_limb_damping) * self.lower_limb_response_speed * dt
-        self.left_elbow_vel += (left_elbow_target_vel - self.left_elbow_vel) * response_factor
-        self.right_elbow_vel += (right_elbow_target_vel - self.right_elbow_vel) * response_factor
-        
-        # Apply drag to elbow velocities (forearms resist movement)
-        self.left_elbow_vel *= self.lower_limb_damping
-        self.right_elbow_vel *= self.lower_limb_damping
-        
-        # Knee physics: shins lag behind thigh movement
-        # When the thigh moves up/down, the shin should lag behind, creating a bend
-        left_knee_target_vel = -self.left_hip_lift_vel * self.lower_limb_inertia
-        right_knee_target_vel = -self.right_hip_lift_vel * self.lower_limb_inertia
-        
-        # Also respond to horizontal movement (hip angle velocity)
-        left_knee_target_vel += abs(self.left_hip_vel) * self.lower_limb_inertia * 0.3
-        right_knee_target_vel += abs(self.right_hip_vel) * self.lower_limb_inertia * 0.3
-        
-        # Interpolate knee velocity toward target (creates lag/inertia effect)
-        self.left_knee_vel += (left_knee_target_vel - self.left_knee_vel) * response_factor
-        self.right_knee_vel += (right_knee_target_vel - self.right_knee_vel) * response_factor
-        
-        # Apply drag to knee velocities (shins resist movement)
-        self.left_knee_vel *= self.lower_limb_damping
-        self.right_knee_vel *= self.lower_limb_damping
-        
-        # Clamp velocities to maximum
-        self.left_shoulder_vel = max(-self.max_velocity, min(self.max_velocity, self.left_shoulder_vel))
-        self.left_shoulder_lift_vel = max(-self.max_velocity, min(self.max_velocity, self.left_shoulder_lift_vel))
-        self.right_shoulder_vel = max(-self.max_velocity, min(self.max_velocity, self.right_shoulder_vel))
-        self.right_shoulder_lift_vel = max(-self.max_velocity, min(self.max_velocity, self.right_shoulder_lift_vel))
-        self.left_hip_vel = max(-self.max_velocity, min(self.max_velocity, self.left_hip_vel))
-        self.left_hip_lift_vel = max(-self.max_velocity, min(self.max_velocity, self.left_hip_lift_vel))
-        self.right_hip_vel = max(-self.max_velocity, min(self.max_velocity, self.right_hip_vel))
-        self.right_hip_lift_vel = max(-self.max_velocity, min(self.max_velocity, self.right_hip_lift_vel))
-        
-        # Update angles based on velocities
-        self.left_shoulder_angle += self.left_shoulder_vel * dt
-        self.left_shoulder_lift += self.left_shoulder_lift_vel * dt
-        self.right_shoulder_angle += self.right_shoulder_vel * dt
-        self.right_shoulder_lift += self.right_shoulder_lift_vel * dt
-        self.left_hip_angle += self.left_hip_vel * dt
-        self.left_hip_lift += self.left_hip_lift_vel * dt
-        self.right_hip_angle += self.right_hip_vel * dt
-        self.right_hip_lift += self.right_hip_lift_vel * dt
-        
-        # Update elbow and knee angles based on their velocities
-        # These angles represent the bend between upper and lower parts
-        self.left_elbow_angle += self.left_elbow_vel * dt
-        self.right_elbow_angle += self.right_elbow_vel * dt
-        self.left_knee_angle += self.left_knee_vel * dt
-        self.right_knee_angle += self.right_knee_vel * dt
-        
-        # Clamp elbow and knee angles to reasonable range
-        # Positive angles = bending (forearm/shin lagging behind)
-        self.left_elbow_angle = max(0, min(self.lower_limb_max_bend, self.left_elbow_angle))
-        self.right_elbow_angle = max(0, min(self.lower_limb_max_bend, self.right_elbow_angle))
-        self.left_knee_angle = max(0, min(self.lower_limb_max_bend, self.left_knee_angle))
-        self.right_knee_angle = max(0, min(self.lower_limb_max_bend, self.right_knee_angle))
-        
-        # Keep angles in reasonable ranges (optional, can be adjusted)
-        # Allow arms to move more freely
-        self.left_shoulder_lift = max(-45, min(135, self.left_shoulder_lift))
-        self.right_shoulder_lift = max(-45, min(135, self.right_shoulder_lift))
-        # Legs should stay pointing down (between 45 and 135 degrees)
-        self.left_hip_lift = max(45, min(135, self.left_hip_lift))
-        self.right_hip_lift = max(45, min(135, self.right_hip_lift))
+            # Space will be garbage collected
+            self.space = None

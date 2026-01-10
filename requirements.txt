@@ -1,6 +1,7 @@
 pygame>=2.5.0
 pyserial>=3.5
 python-dotenv>=1.0.0
+pymunk>=6.9.0
 
 
 
