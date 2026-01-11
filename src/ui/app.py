@@ -23,8 +23,8 @@ import numpy as np
 
 
 # Particle configuration
-PARTICLE_RADIUS = 2  # Smaller particles
-PARTICLE_MASS = 0.1  # Lighter mass for smaller particles
+PARTICLE_RADIUS = 1  # Smaller particles
+PARTICLE_MASS = 0.05  # Lighter mass for smaller particles
 PARTICLE_FRICTION = 0.2
 PARTICLE_ELASTICITY = 0.0
 
@@ -49,18 +49,54 @@ CELL = int(NEIGHBOR_RADIUS)
 # Rendering
 RENDER_SCALE = 4
 ISO_THRESHOLD = 1.15
-FIELD_STRENGTH = 50.0  # Adjusted for smaller particles
-FIELD_SOFTEN = 2.0  # Adjusted for smaller particles to maintain smooth blob appearance
+FIELD_STRENGTH = 30.0  # Adjusted for smaller particles
+FIELD_SOFTEN = 1.5  # Adjusted for smaller particles to maintain smooth blob appearance
 
 # Emission defaults (will be controlled by sensors)
 BASE_PARTICLE_SPEED = 520
 BASE_EMIT_INTERVAL = 0.8
 EMISSION_SPREAD_DEG = 18
 
+# Corridor scrolling effect - 3D perspective
+CORRIDOR_SCROLL_SPEED = 200.0  # Units per second - how fast everything moves backward in Z
+PARTICLE_LIFETIME = 60.0  # Seconds - greatly extended lifetime
+HALLWAY_SEGMENT_LENGTH = 400  # Length of each hallway segment in Z-space
+PERSPECTIVE_FOV = 800.0  # Field of view for perspective projection (larger = wider view)
+VANISHING_POINT_Y = 0.5  # Y position of vanishing point (0.0 = top, 1.0 = bottom, 0.5 = center)
+NEAR_PLANE_Z = 100.0  # Z distance of near plane (closest visible objects)
+FAR_PLANE_Z = 5000.0  # Z distance of far plane (furthest visible objects)
+
 
 def clamp(x, a, b):
     """Clamp value between a and b"""
     return a if x < a else (b if x > b else x)
+
+
+def project_3d_to_2d(x, y, z, screen_width, screen_height):
+    """
+    Project 3D point (x, y, z) to 2D screen coordinates using perspective projection
+    x, y: 2D position in world space
+    z: Depth (distance from camera, increases as objects move backward)
+    Returns: (screen_x, screen_y, scale_factor)
+    """
+    # Perspective projection: objects further away (larger z) appear smaller
+    # Scale factor based on distance from camera
+    scale = PERSPECTIVE_FOV / (PERSPECTIVE_FOV + z)
+    
+    # Vanishing point at center of screen (horizontally) and configurable Y position
+    vanishing_x = screen_width / 2
+    vanishing_y = screen_height * VANISHING_POINT_Y
+    
+    # Project to screen: move towards vanishing point based on depth
+    screen_x = vanishing_x + (x - vanishing_x) * scale
+    screen_y = vanishing_y + (y - vanishing_y) * scale
+    
+    return screen_x, screen_y, scale
+
+
+def get_perspective_scale(z):
+    """Get scale factor for object at depth z"""
+    return PERSPECTIVE_FOV / (PERSPECTIVE_FOV + z)
 
 
 def spatial_hash(positions):
@@ -102,9 +138,23 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30)
 
     # Add each particle's contribution to the field
     for p in particles:
+        # Get 2D position and Z-depth
         x, y = p["body"].position
-        cx = (x / RENDER_SCALE)
-        cy = (y / RENDER_SCALE)
+        z_depth = p.get("z_depth", NEAR_PLANE_Z)
+        
+        # Project 3D to 2D using perspective
+        proj_x, proj_y, scale = project_3d_to_2d(x, y, z_depth, width, height)
+        
+        # Scale particle size based on depth
+        scaled_radius = PARTICLE_RADIUS * scale
+        
+        # Project to low-res buffer coordinates
+        cx = (proj_x / RENDER_SCALE)
+        cy = (proj_y / RENDER_SCALE)
+        
+        # Check if particle is flattened
+        is_flattened = p.get("state") == "flattened"
+        flattened_against = p.get("flattened_against")
 
         # Calculate distance to nearest boundary
         dist_to_bottom = bottom_y_scaled - cy if cy <= bottom_y_scaled else float('inf')
@@ -112,35 +162,75 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30)
         dist_to_left = cx - left_x_scaled if cx >= left_x_scaled else float('inf')
         dist_to_right = right_x_scaled - cx if cx <= right_x_scaled else float('inf')
         
-        # Find closest boundary
-        min_dist = min(dist_to_bottom, dist_to_top, dist_to_left, dist_to_right)
+        # Flattening factor: stronger near boundaries (within 2x scaled particle radius)
+        flatten_range = (scaled_radius * 2) / RENDER_SCALE
         
-        # Flattening factor: stronger near boundaries (within 2x particle radius)
-        flatten_range = (PARTICLE_RADIUS * 2) / RENDER_SCALE
-        if min_dist < flatten_range and min_dist >= 0:
-            # Calculate flattening strength (1.0 at boundary, 0.0 at flatten_range)
-            flatten_strength = 1.0 - (min_dist / flatten_range) if flatten_range > 0 else 0.0
-            flatten_strength = clamp(flatten_strength, 0.0, 1.0)
-            
-            # Determine which boundary is closest for direction
+        # If particle is already flattened, apply maximum flattening and keep it stable
+        if is_flattened:
+            # Maximum flattening for flattened particles - always use flattened_against boundary
+            flatten_strength = 1.0
+            # Always use the boundary it's flattened against (don't recalculate)
+            if flattened_against == "bottom":
+                target_boundary = "bottom"
+            elif flattened_against == "top":
+                target_boundary = "top"
+            elif flattened_against == "left":
+                target_boundary = "left"
+            elif flattened_against == "right":
+                target_boundary = "right"
+            else:
+                # Fallback: find closest boundary
+                min_dist = min(dist_to_bottom, dist_to_top, dist_to_left, dist_to_right)
+                target_boundary = "bottom" if min_dist == dist_to_bottom else \
+                                "top" if min_dist == dist_to_top else \
+                                "left" if min_dist == dist_to_left else "right"
+        else:
+            # Normal particle: find closest boundary and calculate flattening strength
+            # Use smaller range and smoother transition to prevent flickering
+            visual_flatten_range = (PARTICLE_RADIUS * 1.5) / RENDER_SCALE  # Smaller range for visual only
+            min_dist = min(dist_to_bottom, dist_to_top, dist_to_left, dist_to_right)
+            if min_dist < visual_flatten_range and min_dist >= 0:
+                # Calculate flattening strength with smoother curve (1.0 at boundary, 0.0 at range)
+                # Use squared curve for smoother transition
+                t = min_dist / visual_flatten_range if visual_flatten_range > 0 else 0.0
+                flatten_strength = (1.0 - t) * (1.0 - t)  # Quadratic falloff for smoother transition
+                flatten_strength = clamp(flatten_strength, 0.0, 0.6)  # Cap at 0.6 for non-flattened particles
+                # Determine target boundary
+                target_boundary = "bottom" if min_dist == dist_to_bottom else \
+                                "top" if min_dist == dist_to_top else \
+                                "left" if min_dist == dist_to_left else "right"
+            else:
+                # Far from boundaries - no flattening
+                flatten_strength = 0.0
+                target_boundary = None
+        
+        # Apply flattening if particle is flattened or near boundary
+        if flatten_strength > 0.0 and target_boundary:
             # Flattening: make blob wider perpendicular to boundary, shorter parallel to boundary
-            if min_dist == dist_to_bottom:
+            # Increased flattening strength for flattened particles (use 1.2x multiplier)
+            flatten_mult = 1.2 if is_flattened else 0.8
+            
+            if target_boundary == "bottom":
                 # Near bottom: flatten vertically (spread horizontally, squash vertically)
-                # To spread horizontally: reduce dx contribution (divide by > 1, so field extends more)
-                # To squash vertically: increase dy contribution (multiply by > 1, so field extends less)
-                dx = (xs - cx) / (1.0 + flatten_strength * 0.8)  # Spread horizontally
-                dy = (ys - cy) * (1.0 + flatten_strength * 0.8)  # Squash vertically
-                field += FIELD_STRENGTH / (dx*dx + dy*dy + FIELD_SOFTEN)
-            elif min_dist == dist_to_top:
+                dx = (xs - cx) / (1.0 + flatten_strength * flatten_mult)  # Spread horizontally
+                dy = (ys - cy) * (1.0 + flatten_strength * flatten_mult)  # Squash vertically
+                depth_field_strength = FIELD_STRENGTH * scale
+                depth_field_soften = FIELD_SOFTEN * scale
+                field += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
+            elif target_boundary == "top":
                 # Near top: similar flattening
-                dx = (xs - cx) / (1.0 + flatten_strength * 0.8)
-                dy = (ys - cy) * (1.0 + flatten_strength * 0.8)
-                field += FIELD_STRENGTH / (dx*dx + dy*dy + FIELD_SOFTEN)
-            elif min_dist == dist_to_left or min_dist == dist_to_right:
+                dx = (xs - cx) / (1.0 + flatten_strength * flatten_mult)
+                dy = (ys - cy) * (1.0 + flatten_strength * flatten_mult)
+                depth_field_strength = FIELD_STRENGTH * scale
+                depth_field_soften = FIELD_SOFTEN * scale
+                field += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
+            elif target_boundary == "left" or target_boundary == "right":
                 # Near side: flatten horizontally (spread vertically, squash horizontally)
-                dx = (xs - cx) * (1.0 + flatten_strength * 0.8)  # Squash horizontally
-                dy = (ys - cy) / (1.0 + flatten_strength * 0.8)  # Spread vertically
-                field += FIELD_STRENGTH / (dx*dx + dy*dy + FIELD_SOFTEN)
+                dx = (xs - cx) * (1.0 + flatten_strength * flatten_mult)  # Squash horizontally
+                dy = (ys - cy) / (1.0 + flatten_strength * flatten_mult)  # Spread vertically
+                depth_field_strength = FIELD_STRENGTH * scale
+                depth_field_soften = FIELD_SOFTEN * scale
+                field += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
             else:
                 # Default circular
                 dx = xs - cx
@@ -148,9 +238,12 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30)
                 field += FIELD_STRENGTH / (dx*dx + dy*dy + FIELD_SOFTEN)
         else:
             # Normal circular field for particles far from boundaries
+            # Scale field strength by depth (farther particles contribute less)
+            depth_field_strength = FIELD_STRENGTH * scale
+            depth_field_soften = FIELD_SOFTEN * scale
             dx = xs - cx
             dy = ys - cy
-            field += FIELD_STRENGTH / (dx*dx + dy*dy + FIELD_SOFTEN)
+            field += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
 
     # Threshold to get silhouette
     mask = field >= ISO_THRESHOLD
@@ -216,7 +309,7 @@ class Emitter:
         # If sensor value increased significantly, trigger immediate emission
         if sensor_value > 0.05 and (prev_sensor < 0.05 or sensor_value > prev_sensor + 0.3):
             # Immediate emission for new/significant forces
-            num_particles = max(1, int(1 + sensor_value * 4))  # 1 to 5 particles
+            num_particles = max(1, int(1 + sensor_value * 10))  # 1 to 11 particles
             self.time_until_next_emit = self.current_emit_interval
             return num_particles
         
@@ -225,7 +318,7 @@ class Emitter:
             # Higher sensor value = more particles per emission
             # Even with sensor_value=0, emit at least 1 particle occasionally
             if sensor_value > 0.01:
-                num_particles = max(1, int(1 + sensor_value * 4))  # 1 to 5 particles
+                num_particles = max(1, int(1 + sensor_value * 10))  # 1 to 11 particles
             else:
                 num_particles = 0  # No emission when sensor is near zero
             
@@ -390,7 +483,57 @@ class TouchScreenApp:
         self.button_size = 60
         self.button_padding = 20
         
+        # Corridor scrolling effect - 3D perspective
+        self.scroll_offset_z = 0.0  # Current Z scroll offset (increases over time, objects move backward)
+        self.hallway_segments = []  # List of hallway segment positions for wireframe
+        self._initialize_hallway_segments()
+        
         print("TouchScreenApp initialized successfully")
+    
+    def _initialize_hallway_segments(self):
+        """Initialize hallway segments for wireframe visualization with 3D perspective"""
+        # Create initial hallway segments in Z-space that will scroll backward
+        # Each segment is a rectangle representing a section of the corridor
+        num_segments = 10  # Number of segments to maintain
+        for i in range(num_segments):
+            # Segments start at near plane and extend into distance
+            segment_z = NEAR_PLANE_Z + HALLWAY_SEGMENT_LENGTH * i
+            self.hallway_segments.append({
+                "z_depth": segment_z,  # Z position (depth) - increases as segments move backward
+                "base_width": self.screen_width - 60,  # Base hallway width at near plane
+                "base_height": self.screen_height - 60,  # Base hallway height at near plane
+                "segment_length": HALLWAY_SEGMENT_LENGTH  # Length of segment in Z
+            })
+    
+    def _update_hallway_segments(self, dt):
+        """Update hallway segments for scrolling effect in 3D Z-space"""
+        scroll_delta_z = CORRIDOR_SCROLL_SPEED * dt
+        
+        # Move all segments backward in Z (increase Z = farther away)
+        for segment in self.hallway_segments:
+            segment["z_depth"] += scroll_delta_z
+        
+        # Remove segments that have scrolled too far back (beyond far plane)
+        self.hallway_segments = [s for s in self.hallway_segments 
+                                 if s["z_depth"] < FAR_PLANE_Z]
+        
+        # Add new segments at the near plane if needed
+        # Find the closest (smallest Z) segment
+        if self.hallway_segments:
+            min_z = min((s["z_depth"] for s in self.hallway_segments), default=NEAR_PLANE_Z)
+        else:
+            min_z = NEAR_PLANE_Z
+        
+        # Add segments at near plane until we have enough coverage
+        while min_z > NEAR_PLANE_Z - HALLWAY_SEGMENT_LENGTH:
+            new_segment = {
+                "z_depth": min_z - HALLWAY_SEGMENT_LENGTH,
+                "base_width": self.screen_width - 60,
+                "base_height": self.screen_height - 60,
+                "segment_length": HALLWAY_SEGMENT_LENGTH
+            }
+            self.hallway_segments.append(new_segment)
+            min_z = new_segment["z_depth"]
     
     def _calculate_9_16_resolution(self):
         """Calculate resolution with 9:16 aspect ratio"""
@@ -481,6 +624,247 @@ class TouchScreenApp:
         except Exception as e:
             print(f"Warning: Could not load force sequences for testing: {e}")
     
+    def _check_flatten_from_force(self, particle, body, force_x, force_y, dt):
+        """
+        Check if force would push particle past boundary BEFORE applying force
+        If force would push past boundary, flatten the particle immediately
+        """
+        margin = self.margin
+        particle_radius = PARTICLE_RADIUS
+        boundary_thickness = 6
+        
+        # Only check if particle is not already flattened
+        if particle.get("state") == "flattened":
+            return
+        
+        pos_x = float(body.position.x)
+        pos_y = float(body.position.y)
+        vel_x = float(body.velocity.x)
+        vel_y = float(body.velocity.y)
+        
+        # Calculate predicted position after applying this force
+        # acceleration = force / mass
+        accel_x = force_x / PARTICLE_MASS
+        accel_y = force_y / PARTICLE_MASS
+        # Predicted velocity
+        predicted_vel_x = vel_x + accel_x * dt
+        predicted_vel_y = vel_y + accel_y * dt
+        # Predicted position
+        predicted_pos_x = pos_x + predicted_vel_x * dt
+        predicted_pos_y = pos_y + predicted_vel_y * dt
+        
+        # Threshold for being "at" boundary (reduced to prevent premature flattening)
+        at_boundary_threshold = 3.0  # pixels
+        
+        # Skip if particle was recently unflattened (hysteresis to prevent flickering)
+        if particle.get("unflatten_cooldown", 0) > 0:
+            return
+        
+        # Check each boundary to see if force would push particle past
+        # Top boundary (y = margin)
+        boundary_y_top = margin + particle_radius + boundary_thickness
+        if pos_y <= boundary_y_top + at_boundary_threshold:
+            if predicted_pos_y < boundary_y_top or (predicted_vel_y < 0 and pos_y <= boundary_y_top):
+                # Force would push past top boundary - flatten immediately!
+                particle["state"] = "flattened"
+                particle["flattened_against"] = "top"
+                particle["blocked_direction"] = (0.0, 1.0)  # Normal pointing down (towards boundary)
+                body.position = (pos_x, boundary_y_top)
+                body.velocity = (vel_x, 0.0)  # Zero velocity towards boundary, keep tangential
+                return
+        
+        # Bottom boundary
+        boundary_y_bottom = self.screen_height - margin - particle_radius - boundary_thickness
+        if pos_y >= boundary_y_bottom - at_boundary_threshold:
+            if predicted_pos_y > boundary_y_bottom or (predicted_vel_y > 0 and pos_y >= boundary_y_bottom):
+                particle["state"] = "flattened"
+                particle["flattened_against"] = "bottom"
+                particle["blocked_direction"] = (0.0, -1.0)  # Normal pointing up
+                body.position = (pos_x, boundary_y_bottom)
+                body.velocity = (vel_x, 0.0)
+                return
+        
+        # Left boundary
+        boundary_x_left = margin + particle_radius + boundary_thickness
+        if pos_x <= boundary_x_left + at_boundary_threshold:
+            if predicted_pos_x < boundary_x_left or (predicted_vel_x < 0 and pos_x <= boundary_x_left):
+                particle["state"] = "flattened"
+                particle["flattened_against"] = "left"
+                particle["blocked_direction"] = (1.0, 0.0)  # Normal pointing right
+                body.position = (boundary_x_left, pos_y)
+                body.velocity = (0.0, vel_y)
+                return
+        
+        # Right boundary
+        boundary_x_right = self.screen_width - margin - particle_radius - boundary_thickness
+        if pos_x >= boundary_x_right - at_boundary_threshold:
+            if predicted_pos_x > boundary_x_right or (predicted_vel_x > 0 and pos_x >= boundary_x_right):
+                particle["state"] = "flattened"
+                particle["flattened_against"] = "right"
+                particle["blocked_direction"] = (-1.0, 0.0)  # Normal pointing left
+                body.position = (boundary_x_right, pos_y)
+                body.velocity = (0.0, vel_y)
+                return
+    
+    def _check_flatten_from_position_and_velocity(self, particle, body, dt):
+        """
+        Backup check: if particle got past boundary during physics step, flatten it
+        This checks AFTER physics step when positions have been updated
+        """
+        margin = self.margin
+        particle_radius = PARTICLE_RADIUS
+        boundary_thickness = 6
+        
+        # Only check if particle is not already flattened
+        if particle.get("state") == "flattened":
+            return
+        
+        # Skip if particle was recently unflattened (hysteresis to prevent flickering)
+        if particle.get("unflatten_cooldown", 0) > 0:
+            return
+        
+        pos_x = float(body.position.x)
+        pos_y = float(body.position.y)
+        vel_x = float(body.velocity.x)
+        vel_y = float(body.velocity.y)
+        
+        # Check if particle is past boundary
+        boundary_y_top = margin + particle_radius + boundary_thickness
+        boundary_y_bottom = self.screen_height - margin - particle_radius - boundary_thickness
+        boundary_x_left = margin + particle_radius + boundary_thickness
+        boundary_x_right = self.screen_width - margin - particle_radius - boundary_thickness
+        
+        # Top boundary
+        if pos_y < boundary_y_top or (pos_y <= boundary_y_top + 3.0 and vel_y < 0):
+            particle["state"] = "flattened"
+            particle["flattened_against"] = "top"
+            particle["blocked_direction"] = (0.0, 1.0)
+            body.position = (pos_x, boundary_y_top)
+            body.velocity = (vel_x, 0.0)
+            return
+        
+        # Bottom boundary
+        if pos_y > boundary_y_bottom or (pos_y >= boundary_y_bottom - 3.0 and vel_y > 0):
+            particle["state"] = "flattened"
+            particle["flattened_against"] = "bottom"
+            particle["blocked_direction"] = (0.0, -1.0)
+            body.position = (pos_x, boundary_y_bottom)
+            body.velocity = (vel_x, 0.0)
+            return
+        
+        # Left boundary
+        if pos_x < boundary_x_left or (pos_x <= boundary_x_left + 3.0 and vel_x < 0):
+            particle["state"] = "flattened"
+            particle["flattened_against"] = "left"
+            particle["blocked_direction"] = (1.0, 0.0)
+            body.position = (boundary_x_left, pos_y)
+            body.velocity = (0.0, vel_y)
+            return
+        
+        # Right boundary
+        if pos_x > boundary_x_right or (pos_x >= boundary_x_right - 3.0 and vel_x > 0):
+            particle["state"] = "flattened"
+            particle["flattened_against"] = "right"
+            particle["blocked_direction"] = (-1.0, 0.0)
+            body.position = (boundary_x_right, pos_y)
+            body.velocity = (0.0, vel_y)
+            return
+    
+    def _check_unflatten_particle(self, particle, body):
+        """
+        Check if flattened particle should unflatten
+        If force is pulling away from boundary, allow unflattening
+        Uses hysteresis to prevent flickering
+        """
+        if particle["state"] != "flattened" or not particle["blocked_direction"]:
+            return
+        
+        # Check if particle was recently unflattened (cooldown to prevent flickering)
+        if particle.get("unflatten_cooldown", 0) > 0:
+            particle["unflatten_cooldown"] -= 1
+            return
+        
+        blocked_nx, blocked_ny = particle["blocked_direction"]
+        vel_x = float(body.velocity.x)
+        vel_y = float(body.velocity.y)
+        pos_x = float(body.position.x)
+        pos_y = float(body.position.y)
+        
+        # Project velocity onto blocked direction (should be negative if pulling away)
+        vel_dot_blocked = vel_x * blocked_nx + vel_y * blocked_ny
+        
+        # Check distance from boundary - require particle to be clearly away from boundary
+        margin = self.margin
+        particle_radius = PARTICLE_RADIUS
+        boundary_thickness = 6
+        unflatten_buffer = 5.0  # Require particle to be this many pixels away from boundary
+        
+        flattened_against = particle.get("flattened_against")
+        is_away_from_boundary = False
+        
+        if flattened_against == "top":
+            boundary_y = margin + particle_radius + boundary_thickness
+            is_away_from_boundary = pos_y > boundary_y + unflatten_buffer
+        elif flattened_against == "bottom":
+            boundary_y = self.screen_height - margin - particle_radius - boundary_thickness
+            is_away_from_boundary = pos_y < boundary_y - unflatten_buffer
+        elif flattened_against == "left":
+            boundary_x = margin + particle_radius + boundary_thickness
+            is_away_from_boundary = pos_x > boundary_x + unflatten_buffer
+        elif flattened_against == "right":
+            boundary_x = self.screen_width - margin - particle_radius - boundary_thickness
+            is_away_from_boundary = pos_x < boundary_x - unflatten_buffer
+        
+        # Require both: strong pull-away velocity AND distance from boundary
+        # Higher threshold to prevent flickering from small velocity fluctuations
+        if vel_dot_blocked < -30.0 and is_away_from_boundary:
+            particle["state"] = "normal"
+            particle["flattened_against"] = None
+            particle["blocked_direction"] = None
+            particle["unflatten_cooldown"] = 10  # Cooldown frames to prevent immediate re-flattening
+    
+    def _maintain_flattened_position(self, particle):
+        """Keep flattened particle exactly at boundary position with strong friction"""
+        margin = self.margin
+        particle_radius = PARTICLE_RADIUS
+        boundary_thickness = 6
+        body = particle["body"]
+        pos_x = float(body.position.x)
+        pos_y = float(body.position.y)
+        flattened_against = particle.get("flattened_against")
+        blocked_direction = particle.get("blocked_direction")
+        
+        # Strong friction coefficient for flattened particles (reduce tangential velocity significantly)
+        FLATTENED_FRICTION = 0.3  # Keep only 30% of tangential velocity per frame (strong friction)
+        
+        # Snap to exact boundary position and apply friction using blocked direction
+        if flattened_against and blocked_direction:
+            blocked_nx, blocked_ny = blocked_direction
+            vel_x, vel_y = float(body.velocity.x), float(body.velocity.y)
+            
+            # Project velocity onto blocked direction (normal) and tangential
+            vel_dot_blocked = vel_x * blocked_nx + vel_y * blocked_ny
+            vel_normal_x = vel_dot_blocked * blocked_nx
+            vel_normal_y = vel_dot_blocked * blocked_ny
+            vel_tangential_x = vel_x - vel_normal_x
+            vel_tangential_y = vel_y - vel_normal_y
+            
+            # Zero normal velocity, apply friction to tangential
+            new_vel_x = vel_tangential_x * FLATTENED_FRICTION
+            new_vel_y = vel_tangential_y * FLATTENED_FRICTION
+            
+            # Snap to exact boundary position based on which boundary
+            if flattened_against == "top":
+                body.position = (pos_x, margin + particle_radius + boundary_thickness)
+            elif flattened_against == "bottom":
+                body.position = (pos_x, self.screen_height - margin - particle_radius - boundary_thickness)
+            elif flattened_against == "left":
+                body.position = (margin + particle_radius + boundary_thickness, pos_y)
+            elif flattened_against == "right":
+                body.position = (self.screen_width - margin - particle_radius - boundary_thickness, pos_y)
+            
+            body.velocity = (new_vel_x, new_vel_y)
+    
     def _enforce_boundary_collisions(self):
         """Manually enforce hard boundary collisions and stickiness"""
         margin = self.margin
@@ -488,6 +872,15 @@ class TouchScreenApp:
         boundary_thickness = 6  # Boundary segment radius
         
         for p in self.particles:
+            # Skip collision handling for flattened particles in their flattened direction
+            # They've already been positioned and stopped
+            if p["state"] == "flattened":
+                # Check if they should unflatten (force pulling away)
+                self._check_unflatten_particle(p, p["body"])
+                # Keep flattened particles exactly at boundary
+                if p["flattened_against"]:
+                    self._maintain_flattened_position(p)
+                continue
             body = p["body"]
             pos_x = float(body.position.x)
             pos_y = float(body.position.y)
@@ -890,6 +1283,12 @@ class TouchScreenApp:
         self.last_update_time = current_time
         dt = clamp(dt, 0.0, 1.0 / 20.0)
         
+        # Update corridor scroll offset in Z (everything moves backward in depth)
+        self.scroll_offset_z += CORRIDOR_SCROLL_SPEED * dt
+        
+        # Update hallway segments for wireframe visualization
+        self._update_hallway_segments(dt)
+        
         # Update sequence time (in seconds)
         self.sequence_time = current_time / 1000.0
         
@@ -921,7 +1320,16 @@ class TouchScreenApp:
                     py += random.uniform(-3, 3)
                     
                     body, shape = self._make_particle(px, py, vx, vy)
-                    self.particles.append({"body": body, "shape": shape, "age": 0.0})
+                    self.particles.append({
+                        "body": body, 
+                        "shape": shape, 
+                        "age": 0.0,
+                        "z_depth": NEAR_PLANE_Z,  # Start at near plane, will increase as it moves backward
+                        "state": "normal",  # "normal" or "flattened"
+                        "flattened_against": None,  # "top", "bottom", "left", "right", or None
+                        "blocked_direction": None,  # Normal vector (x, y) of blocked direction, or None
+                        "unflatten_cooldown": 0  # Cooldown counter to prevent flickering
+                    })
                 except Exception as e:
                     print(f"Error emitting particle from {emitter.name}: {e}")
         
@@ -983,20 +1391,96 @@ class TouchScreenApp:
                     fx += rvx * VISCOSITY
                     fy += rvy * VISCOSITY
             
+            # Calculate gravity force once
+            gravity_x, gravity_y = GRAVITY
+            gravity_force_x = gravity_x * PARTICLE_MASS
+            gravity_force_y = gravity_y * PARTICLE_MASS
+            
+            # Check if normal particle should flatten BEFORE applying forces
+            # This checks if the combined force (fluid + gravity) would push it past boundary
+            if p.get("state") != "flattened":
+                # Calculate total force including gravity
+                total_force_x = fx + gravity_force_x
+                total_force_y = fy + gravity_force_y
+                
+                # Check if this force would push particle past boundary
+                self._check_flatten_from_force(p, bi, total_force_x, total_force_y, dt)
+            
+            # Filter forces based on flattened state
+            # If particle is now flattened (from check above), remove forces in blocked direction
+            # and apply friction to tangential forces
+            if p.get("state") == "flattened" and p.get("blocked_direction"):
+                blocked_nx, blocked_ny = p["blocked_direction"]
+                FLATTENED_FRICTION = 0.3  # Strong friction - reduce tangential forces
+                
+                # Project fluid force onto blocked direction (normal) and tangential
+                force_dot_blocked = fx * blocked_nx + fy * blocked_ny
+                force_normal_x = force_dot_blocked * blocked_nx
+                force_normal_y = force_dot_blocked * blocked_ny
+                force_tangential_x = fx - force_normal_x
+                force_tangential_y = fy - force_normal_y
+                
+                # Remove normal force, apply friction to tangential force
+                if force_dot_blocked > 0:  # Pushing towards blocked boundary
+                    fx = force_tangential_x * FLATTENED_FRICTION
+                    fy = force_tangential_y * FLATTENED_FRICTION
+                else:
+                    # Not pushing towards boundary, just apply friction to tangential
+                    fx = force_tangential_x * FLATTENED_FRICTION + force_normal_x
+                    fy = force_tangential_y * FLATTENED_FRICTION + force_normal_y
+                
+                # Also filter gravity - cannot push in blocked direction, apply friction to tangential
+                gravity_dot_blocked = gravity_force_x * blocked_nx + gravity_force_y * blocked_ny
+                gravity_normal_x = gravity_dot_blocked * blocked_nx
+                gravity_normal_y = gravity_dot_blocked * blocked_ny
+                gravity_tangential_x = gravity_force_x - gravity_normal_x
+                gravity_tangential_y = gravity_force_y - gravity_normal_y
+                
+                # Remove normal component, apply friction to tangential
+                if gravity_dot_blocked > 0:  # Gravity pushing towards blocked boundary
+                    gravity_force_x = gravity_tangential_x * FLATTENED_FRICTION
+                    gravity_force_y = gravity_tangential_y * FLATTENED_FRICTION
+                else:
+                    # Not pushing towards boundary, just apply friction to tangential
+                    gravity_force_x = gravity_tangential_x * FLATTENED_FRICTION + gravity_normal_x
+                    gravity_force_y = gravity_tangential_y * FLATTENED_FRICTION + gravity_normal_y
+                
+                # Also apply friction to velocity component (reduce tangential velocity)
+                vel_x, vel_y = float(bi.velocity.x), float(bi.velocity.y)
+                vel_dot_blocked = vel_x * blocked_nx + vel_y * blocked_ny
+                vel_normal_x = vel_dot_blocked * blocked_nx
+                vel_normal_y = vel_dot_blocked * blocked_ny
+                vel_tangential_x = vel_x - vel_normal_x
+                vel_tangential_y = vel_y - vel_normal_y
+                
+                # Zero normal velocity, apply friction to tangential
+                new_vel_x = vel_tangential_x * FLATTENED_FRICTION
+                new_vel_y = vel_tangential_y * FLATTENED_FRICTION
+                bi.velocity = (new_vel_x, new_vel_y)
+            
             # Apply fluid forces (pressure, viscosity, cohesion)
             bi.apply_force_at_local_point((fx, fy), (0, 0))
             
             # Apply gravity manually (force = mass * acceleration)
-            # GRAVITY is acceleration in pixels/s^2, so force = mass * gravity
-            gravity_x, gravity_y = GRAVITY
-            gravity_force_x = gravity_x * PARTICLE_MASS
-            gravity_force_y = gravity_y * PARTICLE_MASS
             bi.apply_force_at_local_point((gravity_force_x, gravity_force_y), (0, 0))
         
         # Step physics (integrates forces into velocities and positions)
         self.space.step(dt)
         
+        # Apply corridor scrolling: move all particles backward in Z-depth (3D perspective)
+        scroll_delta_z = CORRIDOR_SCROLL_SPEED * dt
+        for p in self.particles:
+            # Move particle backward in Z (increase Z = farther away)
+            p["z_depth"] = p.get("z_depth", NEAR_PLANE_Z) + scroll_delta_z
+        
+        # Check for particles that should flatten AFTER physics step (backup check)
+        # This catches any particles that got pushed past boundaries during physics step
+        for p in self.particles:
+            if p.get("state") != "flattened":
+                self._check_flatten_from_position_and_velocity(p, p["body"], dt)
+        
         # Enforce hard boundary collisions and stickiness (manual collision handling)
+        # Flattened particles are handled separately - they skip normal collision
         self._enforce_boundary_collisions()
         
         # Apply global damping and cleanup
@@ -1005,14 +1489,39 @@ class TouchScreenApp:
             p["age"] += dt
             b = p["body"]
             vx, vy = float(b.velocity.x), float(b.velocity.y)
-            b.velocity = (vx * DAMPING, vy * DAMPING)
             
-            # Remove old particles
-            if p["age"] > 10.0:
+            # Apply extra friction to flattened particles
+            if p.get("state") == "flattened" and p.get("blocked_direction"):
+                blocked_nx, blocked_ny = p["blocked_direction"]
+                FLATTENED_FRICTION = 0.3
+                
+                # Project velocity onto normal and tangential
+                vel_dot_blocked = vx * blocked_nx + vy * blocked_ny
+                vel_normal_x = vel_dot_blocked * blocked_nx
+                vel_normal_y = vel_dot_blocked * blocked_ny
+                vel_tangential_x = vx - vel_normal_x
+                vel_tangential_y = vy - vel_normal_y
+                
+                # Apply strong friction to tangential velocity
+                new_vx = vel_tangential_x * FLATTENED_FRICTION
+                new_vy = vel_tangential_y * FLATTENED_FRICTION
+                b.velocity = (new_vx, new_vy)
+            else:
+                # Normal damping for non-flattened particles
+                b.velocity = (vx * DAMPING, vy * DAMPING)
+            
+            # Remove old particles (greatly extended lifetime)
+            if p["age"] > PARTICLE_LIFETIME:
                 dead.append(idx)
                 continue
             
-            # Remove particles outside screen
+            # Remove particles that are too far back in Z (beyond far plane)
+            z_depth = p.get("z_depth", NEAR_PLANE_Z)
+            if z_depth > FAR_PLANE_Z:
+                dead.append(idx)
+                continue
+            
+            # Also remove particles outside screen bounds (2D check)
             x, y = float(b.position.x), float(b.position.y)
             margin = 200
             if x < -margin or x > self.screen_width + margin or \
@@ -1048,6 +1557,71 @@ class TouchScreenApp:
         button_x = screen_width - self.button_size - self.button_padding
         button_y = self.button_padding
         return pygame.Rect(button_x, button_y, self.button_size, self.button_size)
+    
+    def _draw_hallway_wireframe(self):
+        """Draw wireframe hallway segments with 3D perspective projection"""
+        wireframe_color = (100, 100, 150)  # Blue-gray wireframe color
+        line_width = 2
+        
+        # Draw each hallway segment as a wireframe rectangle with perspective
+        for segment in self.hallway_segments:
+            z_depth = segment["z_depth"]
+            
+            # Skip segments that are too far back or too close
+            if z_depth < NEAR_PLANE_Z - HALLWAY_SEGMENT_LENGTH or z_depth > FAR_PLANE_Z:
+                continue
+            
+            # Get perspective scale for this depth
+            scale = get_perspective_scale(z_depth)
+            
+            # Calculate scaled dimensions (hallway gets smaller as it recedes)
+            scaled_width = segment["base_width"] * scale
+            scaled_height = segment["base_height"] * scale
+            
+            # Center of screen (vanishing point horizontally)
+            center_x = self.screen_width / 2
+            vanishing_y = self.screen_height * VANISHING_POINT_Y
+            
+            # Calculate rectangle corners with perspective
+            # Rectangle is centered horizontally, positioned vertically based on depth
+            left = center_x - scaled_width / 2
+            right = center_x + scaled_width / 2
+            top = vanishing_y - scaled_height / 2
+            bottom = vanishing_y + scaled_height / 2
+            
+            # Only draw if rectangle is visible on screen
+            if right < 0 or left > self.screen_width or bottom < 0 or top > self.screen_height:
+                continue
+            
+            # Draw wireframe rectangle (four lines)
+            # Clamp to screen bounds
+            draw_left = max(0, int(left))
+            draw_right = min(self.screen_width, int(right))
+            draw_top = max(0, int(top))
+            draw_bottom = min(self.screen_height, int(bottom))
+            
+            # Top horizontal line
+            if draw_bottom > 0 and draw_top < self.screen_height:
+                pygame.draw.line(self.screen, wireframe_color, 
+                               (draw_left, draw_top), (draw_right, draw_top), line_width)
+            
+            # Bottom horizontal line
+            if draw_bottom > 0 and draw_bottom < self.screen_height:
+                pygame.draw.line(self.screen, wireframe_color,
+                               (draw_left, draw_bottom), 
+                               (draw_right, draw_bottom), line_width)
+            
+            # Left vertical line
+            if draw_right > 0 and draw_left < self.screen_width:
+                if draw_bottom > draw_top:
+                    pygame.draw.line(self.screen, wireframe_color,
+                                   (draw_left, draw_top), (draw_left, draw_bottom), line_width)
+            
+            # Right vertical line
+            if draw_right > 0 and draw_right < self.screen_width:
+                if draw_bottom > draw_top:
+                    pygame.draw.line(self.screen, wireframe_color,
+                                   (draw_right, draw_top), (draw_right, draw_bottom), line_width)
     
     def draw(self):
         """Render the application"""
@@ -1165,9 +1739,10 @@ class TouchScreenApp:
             )
             self.screen.blit(fps_text, (10, 10))
         
-        # Draw particle count and sequence info
+        # Draw particle count and flattened count
+        flattened_count = sum(1 for p in self.particles if p.get("state") == "flattened")
         particle_text = self.font_small.render(
-            f"Particles: {len(self.particles)}",
+            f"Particles: {len(self.particles)} ({flattened_count} flattened)",
             True,
             tuple(self.theme['text_color'])
         )
@@ -1181,6 +1756,9 @@ class TouchScreenApp:
                 (150, 150, 150)  # Gray
             )
             self.screen.blit(seq_text, (10, self.screen_height - 80))
+        
+        # Draw hallway wireframe (before particles so it appears behind)
+        self._draw_hallway_wireframe()
         
         # Draw particles using metaball rendering with flattening near boundaries
         if len(self.particles) > 0:
