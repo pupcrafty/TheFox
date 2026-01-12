@@ -98,23 +98,3 @@ class Renderer:
         
         # Update display (single flip)
         pygame.display.flip()
-    
-    def render_to_surface(self) -> pygame.Surface:
-        """
-        Execute all drawing operations but return the surface instead of flipping
-        Useful for rendering to an intermediate surface
-        
-        Returns:
-            The rendered surface
-        """
-        # Sort operations by layer
-        self.draw_operations.sort(key=lambda x: x[0])
-        
-        # Execute all drawing operations
-        for layer, draw_func in self.draw_operations:
-            draw_func(self.screen)
-        
-        # Clear operations
-        self.draw_operations.clear()
-        
-        return self.screen

@@ -119,89 +119,6 @@ def generate_decagon_vertices(center_x, center_y, radius):
     return vertices
 
 
-def point_in_decagon(px, py, center_x, center_y, radius):
-    """
-    Check if a point is inside a decagon
-    Uses ray casting algorithm
-    """
-    # Generate decagon vertices
-    vertices = generate_decagon_vertices(center_x, center_y, radius)
-    
-    # Ray casting: count intersections with polygon edges
-    num_vertices = len(vertices)
-    inside = False
-    j = num_vertices - 1
-    
-    for i in range(num_vertices):
-        xi, yi = vertices[i]
-        xj, yj = vertices[j]
-        
-        # Check if ray from point to right intersects edge
-        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
-            inside = not inside
-        j = i
-    
-    return inside
-
-
-def distance_to_decagon_edge(px, py, center_x, center_y, radius):
-    """
-    Calculate distance from point to nearest decagon edge
-    Returns (distance, nearest_edge_index, normal_vector)
-    """
-    vertices = generate_decagon_vertices(center_x, center_y, radius)
-    num_vertices = len(vertices)
-    
-    min_dist = float('inf')
-    nearest_edge = 0
-    normal = (0, 0)
-    
-    for i in range(num_vertices):
-        v1 = vertices[i]
-        v2 = vertices[(i + 1) % num_vertices]
-        
-        # Calculate distance from point to line segment
-        # Vector from v1 to v2
-        edge_dx = v2[0] - v1[0]
-        edge_dy = v2[1] - v1[1]
-        edge_len = math.sqrt(edge_dx * edge_dx + edge_dy * edge_dy)
-        
-        if edge_len < 1e-6:
-            continue
-        
-        # Vector from v1 to point
-        to_point_dx = px - v1[0]
-        to_point_dy = py - v1[1]
-        
-        # Project point onto edge
-        t = clamp((to_point_dx * edge_dx + to_point_dy * edge_dy) / (edge_len * edge_len), 0.0, 1.0)
-        
-        # Closest point on edge
-        closest_x = v1[0] + t * edge_dx
-        closest_y = v1[1] + t * edge_dy
-        
-        # Distance from point to closest point on edge
-        dx = px - closest_x
-        dy = py - closest_y
-        dist = math.sqrt(dx * dx + dy * dy)
-        
-        if dist < min_dist:
-            min_dist = dist
-            nearest_edge = i
-            # Normal vector pointing outward from edge
-            normal_x = -edge_dy / edge_len  # Perpendicular to edge
-            normal_y = edge_dx / edge_len
-            # Make sure normal points outward (away from center)
-            to_center_dx = center_x - closest_x
-            to_center_dy = center_y - closest_y
-            if normal_x * to_center_dx + normal_y * to_center_dy > 0:
-                normal_x = -normal_x
-                normal_y = -normal_y
-            normal = (normal_x, normal_y)
-    
-    return min_dist, nearest_edge, normal
-
-
 def spatial_hash(positions):
     """Create spatial hash grid for neighbor finding"""
     grid = defaultdict(list)
@@ -540,7 +457,6 @@ class TouchScreenApp:
         self.current_sequence: Optional[str] = None
         self.sequence_start_time: float = 0.0
         self.sequence_playing: bool = False
-        self.active_force_effects: List[Dict] = []  # Active force effects with fade
         self.active_forces_display: List[Dict] = []  # For display on screen
         
         # Load force sequences from JSON
@@ -720,9 +636,6 @@ class TouchScreenApp:
         self.decagon_center_y = self.screen_height * VANISHING_POINT_Y
         self.decagon_radius = min(self.screen_width, self.screen_height) / 2 - margin
         
-        # Store boundary lines for collision checking [(x1,y1), (x2,y2), normal]
-        # For decagon, we'll generate these dynamically
-        self.boundary_lines = []  # Will be generated from decagon vertices
     
     def _load_force_sequences(self):
         """Load force sequences from JSON file for testing emitter behavior"""
@@ -1115,7 +1028,6 @@ class TouchScreenApp:
         self.current_sequence = sequence_name
         self.sequence_start_time = self.sequence_time
         self.sequence_playing = True
-        self.active_force_effects.clear()
         self.sensor_values = [0.0, 0.0, 0.0, 0.0]  # Reset sensor values
         
         sequence = self.force_sequences[sequence_name]
@@ -1126,7 +1038,6 @@ class TouchScreenApp:
         """Stop currently playing force sequence"""
         self.sequence_playing = False
         self.current_sequence = None
-        self.active_force_effects.clear()
     
     def _update_force_sequences(self, dt: float):
         """Update active force sequences and map them to emitter sensor values"""
@@ -1404,7 +1315,6 @@ class TouchScreenApp:
                         "shape": shape, 
                         "age": 0.0,
                         "z_depth": NEAR_PLANE_Z,  # Start at near plane
-                        "z_velocity": FORWARD_LAUNCH_VELOCITY,  # Initial forward launch velocity (negative = toward camera)
                         "state": "normal",  # "normal" or "flattened"
                         "flattened_against": None,  # "top", "bottom", "left", "right", or None
                         "blocked_direction": None  # Normal vector (x, y) of blocked direction, or None
@@ -1546,21 +1456,13 @@ class TouchScreenApp:
         # Step physics (integrates forces into velocities and positions)
         self.space.step(dt)
         
-        # Apply forward launch velocity and corridor scrolling
+        # Apply corridor scrolling (matches decagon movement rate)
         scroll_delta_z = CORRIDOR_SCROLL_SPEED * dt
         for p in self.particles:
             current_z = p.get("z_depth", NEAR_PLANE_Z)
-            z_velocity = p.get("z_velocity", 0.0)
             
-            # Apply forward launch velocity (decays over time)
-            # Negative velocity = forward (toward camera), positive = backward (away from camera)
-            forward_delta_z = z_velocity * dt
-            
-            # Apply scrolling (always pushes backward)
-            new_z = current_z + forward_delta_z + scroll_delta_z
-            
-            # Decay forward velocity (particles slow down their forward motion)
-            p["z_velocity"] = z_velocity * FORWARD_LAUNCH_DECAY
+            # Apply scrolling (always pushes backward at same rate as decagons)
+            new_z = current_z + scroll_delta_z
             
             # Clamp Z to reasonable bounds
             p["z_depth"] = clamp(new_z, NEAR_PLANE_Z - 200, FAR_PLANE_Z)
