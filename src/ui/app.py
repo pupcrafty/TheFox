@@ -13,6 +13,7 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime as dt
+from functools import lru_cache
 
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -142,6 +143,14 @@ def neighbor_cells(cx, cy):
             yield (cx + ox, cy + oy)
 
 
+@lru_cache(maxsize=8)
+def _get_metaball_grid(width: int, height: int) -> Tuple[np.ndarray, np.ndarray]:
+    w2, h2 = width // RENDER_SCALE, height // RENDER_SCALE
+    ys = np.arange(h2, dtype=np.float32)[:, None]
+    xs = np.arange(w2, dtype=np.float32)[None, :]
+    return xs, ys
+
+
 def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30, decagon_center_x=None, decagon_center_y=None, decagon_radius=None):
     """
     Draw particles using metaball rendering with flattening near decagon boundaries
@@ -153,8 +162,7 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30,
     field = np.zeros((h2, w2), dtype=np.float32)
 
     # Precompute a grid of pixel coordinates (low-res)
-    ys = np.arange(h2, dtype=np.float32)[:, None]
-    xs = np.arange(w2, dtype=np.float32)[None, :]
+    xs, ys = _get_metaball_grid(width, height)
 
     # Add each particle's contribution to the field
     for p in particles:
@@ -224,6 +232,25 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30,
                 
                 flatten_strength = clamp(flatten_strength, 0.0, 1.0)
         
+        depth_field_strength = FIELD_STRENGTH * scale
+        depth_field_soften = FIELD_SOFTEN * scale
+        max_radius_sq = (depth_field_strength / ISO_THRESHOLD) - depth_field_soften
+        if max_radius_sq <= 0:
+            continue
+        influence_radius = math.sqrt(max_radius_sq)
+        if flatten_strength > 0.0:
+            influence_radius *= 1.4
+
+        x0 = max(int(cx - influence_radius), 0)
+        x1 = min(int(cx + influence_radius) + 1, w2)
+        y0 = max(int(cy - influence_radius), 0)
+        y1 = min(int(cy + influence_radius) + 1, h2)
+        if x1 <= x0 or y1 <= y0:
+            continue
+
+        xs_slice = xs[:, x0:x1]
+        ys_slice = ys[y0:y1, :]
+
         # Apply flattening based on decagon surface normal
         if flatten_strength > 0.0 and (normal_x != 0.0 or normal_y != 0.0):
             # Flattening: make blob wider perpendicular to surface normal, shorter parallel to normal
@@ -236,8 +263,8 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30,
             
             # Transform coordinates: spread along tangent, squash along normal
             # Project (xs-cx, ys-cy) onto normal and tangent
-            dx_local = xs - cx
-            dy_local = ys - cy
+            dx_local = xs_slice - cx
+            dy_local = ys_slice - cy
             
             # Project onto normal and tangent using numpy operations
             dot_normal = dx_local * normal_x + dy_local * normal_y
@@ -247,17 +274,13 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30,
             dx = dot_tangent / (1.0 + flatten_strength * flatten_mult * 0.5)  # Spread perpendicular
             dy = dot_normal * (1.0 + flatten_strength * flatten_mult)  # Squash parallel
             
-            depth_field_strength = FIELD_STRENGTH * scale
-            depth_field_soften = FIELD_SOFTEN * scale
-            field += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
+            field[y0:y1, x0:x1] += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
         else:
             # Normal circular field for particles far from boundaries
             # Scale field strength by depth (farther particles contribute less)
-            depth_field_strength = FIELD_STRENGTH * scale
-            depth_field_soften = FIELD_SOFTEN * scale
-            dx = xs - cx
-            dy = ys - cy
-            field += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
+            dx = xs_slice - cx
+            dy = ys_slice - cy
+            field[y0:y1, x0:x1] += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
 
     # Threshold to get silhouette
     mask = field >= ISO_THRESHOLD
