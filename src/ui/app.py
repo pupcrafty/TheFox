@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config import load_all_config
 from hardware.arduino_interface import ArduinoInterface
+from ui.renderer import Renderer, RenderLayer
 import pymunk
 import numpy as np
 
@@ -344,6 +345,8 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30,
 
     surf = pygame.surfarray.make_surface(img.swapaxes(0, 1))
     surf = pygame.transform.smoothscale(surf, (width, height))
+    # Set black as the colorkey to make background transparent
+    surf.set_colorkey((0, 0, 0))
     screen.blit(surf, (0, 0))
 
 
@@ -462,6 +465,9 @@ class TouchScreenApp:
             )
         
         pygame.display.set_caption("Raspberry Pi Touch App")
+        
+        # Initialize renderer for layered drawing
+        self.renderer = Renderer(self.screen)
         
         # Initialize clock for FPS control
         self.clock = pygame.time.Clock()
@@ -1644,82 +1650,86 @@ class TouchScreenApp:
         button_y = self.button_padding
         return pygame.Rect(button_x, button_y, self.button_size, self.button_size)
     
-    def _draw_hallway_wireframe(self):
-        """Draw wireframe hallway segments as decagons with 3D perspective projection"""
-        # Use brighter color for better visibility
-        wireframe_color = (120, 140, 180)  # Brighter blue-gray wireframe color
-        line_width = 2
-        
-        # Safety check: if no segments, reinitialize
-        if not self.hallway_segments:
-            self._initialize_hallway_segments()
-        
-        # Draw each hallway segment as a wireframe decagon with perspective
-        # Sort segments by Z-depth to draw back-to-front (though with wireframe it doesn't matter much)
-        sorted_segments = sorted(self.hallway_segments, key=lambda s: s["z_depth"])
-        
-        segments_drawn = 0
-        for segment in sorted_segments:
-            z_depth = segment["z_depth"]
+    def _get_hallway_wireframe_draw_func(self):
+        """Get a draw function for wireframe hallway segments"""
+        def draw_func(screen):
+            """Draw wireframe hallway segments as decagons with 3D perspective projection"""
+            # Use brighter color for better visibility
+            wireframe_color = (120, 140, 180)  # Brighter blue-gray wireframe color
+            line_width = 2
             
-            # Only skip segments that are definitely too far back (beyond far plane)
-            # Keep drawing segments even if they're slightly beyond, for smooth transition
-            # Use a much larger buffer to keep segments visible longer
-            if z_depth > FAR_PLANE_Z * 1.5:
-                continue
+            # Safety check: if no segments, reinitialize
+            if not self.hallway_segments:
+                self._initialize_hallway_segments()
             
-            # Get perspective scale for this depth
-            scale = get_perspective_scale(z_depth)
+            # Draw each hallway segment as a wireframe decagon with perspective
+            # Sort segments by Z-depth to draw back-to-front (though with wireframe it doesn't matter much)
+            sorted_segments = sorted(self.hallway_segments, key=lambda s: s["z_depth"])
             
-            # Relaxed visibility check - only skip if scale is extremely small
-            # This allows very distant segments to still be drawn (they'll be tiny but visible)
-            if scale < 0.001:
-                continue
-            
-            # Calculate scaled radius (decagon gets smaller as it recedes)
-            scaled_radius = segment["base_radius"] * scale
-            
-            # Relaxed radius check - allow very small decagons to be drawn
-            # Even tiny decagons contribute to the tunnel effect
-            if scaled_radius < 1.0:
-                continue
-            
-            # Center of screen (vanishing point)
-            center_x = self.screen_width / 2
-            center_y = self.screen_height * VANISHING_POINT_Y
-            
-            # Generate decagon vertices
-            vertices = generate_decagon_vertices(center_x, center_y, scaled_radius)
-            
-            # Draw decagon wireframe (connect vertices)
-            num_vertices = len(vertices)
-            for i in range(num_vertices):
-                v1 = vertices[i]
-                v2 = vertices[(i + 1) % num_vertices]
+            segments_drawn = 0
+            for segment in sorted_segments:
+                z_depth = segment["z_depth"]
                 
-                # Clamp vertices to screen bounds for drawing
-                v1_x = max(0, min(self.screen_width, int(v1[0])))
-                v1_y = max(0, min(self.screen_height, int(v1[1])))
-                v2_x = max(0, min(self.screen_width, int(v2[0])))
-                v2_y = max(0, min(self.screen_height, int(v2[1])))
+                # Only skip segments that are definitely too far back (beyond far plane)
+                # Keep drawing segments even if they're slightly beyond, for smooth transition
+                # Use a much larger buffer to keep segments visible longer
+                if z_depth > FAR_PLANE_Z * 1.5:
+                    continue
                 
-                # Draw line if it's not completely off-screen
-                # Allow lines that are partially visible
-                if not ((v1_x == 0 and v2_x == 0 and v1_x == v2_x) or 
-                        (v1_x == self.screen_width and v2_x == self.screen_width and v1_x == v2_x) or
-                        (v1_y == 0 and v2_y == 0 and v1_y == v2_y) or 
-                        (v1_y == self.screen_height and v2_y == self.screen_height and v1_y == v2_y)):
-                    pygame.draw.line(self.screen, wireframe_color, 
-                                   (v1_x, v1_y), 
-                                   (v2_x, v2_y), line_width)
-            
-            segments_drawn += 1
+                # Get perspective scale for this depth
+                scale = get_perspective_scale(z_depth)
+                
+                # Relaxed visibility check - only skip if scale is extremely small
+                # This allows very distant segments to still be drawn (they'll be tiny but visible)
+                if scale < 0.001:
+                    continue
+                
+                # Calculate scaled radius (decagon gets smaller as it recedes)
+                scaled_radius = segment["base_radius"] * scale
+                
+                # Relaxed radius check - allow very small decagons to be drawn
+                # Even tiny decagons contribute to the tunnel effect
+                if scaled_radius < 1.0:
+                    continue
+                
+                # Center of screen (vanishing point)
+                center_x = self.screen_width / 2
+                center_y = self.screen_height * VANISHING_POINT_Y
+                
+                # Generate decagon vertices
+                vertices = generate_decagon_vertices(center_x, center_y, scaled_radius)
+                
+                # Draw decagon wireframe (connect vertices)
+                num_vertices = len(vertices)
+                for i in range(num_vertices):
+                    v1 = vertices[i]
+                    v2 = vertices[(i + 1) % num_vertices]
+                    
+                    # Clamp vertices to screen bounds for drawing
+                    v1_x = max(0, min(self.screen_width, int(v1[0])))
+                    v1_y = max(0, min(self.screen_height, int(v1[1])))
+                    v2_x = max(0, min(self.screen_width, int(v2[0])))
+                    v2_y = max(0, min(self.screen_height, int(v2[1])))
+                    
+                    # Draw line if it's not completely off-screen
+                    # Allow lines that are partially visible
+                    if not ((v1_x == 0 and v2_x == 0 and v1_x == v2_x) or 
+                            (v1_x == self.screen_width and v2_x == self.screen_width and v1_x == v2_x) or
+                            (v1_y == 0 and v2_y == 0 and v1_y == v2_y) or 
+                            (v1_y == self.screen_height and v2_y == self.screen_height and v1_y == v2_y)):
+                        pygame.draw.line(screen, wireframe_color, 
+                                       (v1_x, v1_y), 
+                                       (v2_x, v2_y), line_width)
+                
+                segments_drawn += 1
+        
+        return draw_func
     
     def draw(self):
-        """Render the application"""
+        """Render the application using the renderer"""
         # Clear screen
         bg_color = self.theme['background_color']
-        self.screen.fill(tuple(bg_color))
+        self.renderer.clear(tuple(bg_color))
         
         # Draw title
         title_text = self.font_large.render(
@@ -1728,7 +1738,7 @@ class TouchScreenApp:
             tuple(self.theme['text_color'])
         )
         title_rect = title_text.get_rect(center=(self.screen.get_width() // 2, 100))
-        self.screen.blit(title_text, title_rect)
+        self.renderer.add_surface_rect(RenderLayer.UI_TEXT, title_text, title_rect)
         
         # Draw Arduino connection status
         arduino_status = "Connected" if self.arduino.is_connected() else "Disconnected"
@@ -1739,24 +1749,25 @@ class TouchScreenApp:
             status_color
         )
         status_rect = status_text.get_rect(center=(self.screen.get_width() // 2, 200))
-        self.screen.blit(status_text, status_rect)
+        self.renderer.add_surface_rect(RenderLayer.UI_TEXT, status_text, status_rect)
         
         # Draw current sequence status and active forces
+        y_offset = 250
         if self.sequence_playing and self.current_sequence:
             sequence_text = self.font_medium.render(
                 f"Playing: {self.current_sequence}",
                 True,
                 (0, 255, 255)  # Cyan color
             )
-            sequence_rect = sequence_text.get_rect(center=(self.screen.get_width() // 2, 250))
-            self.screen.blit(sequence_text, sequence_rect)
+            sequence_rect = sequence_text.get_rect(center=(self.screen.get_width() // 2, y_offset))
+            self.renderer.add_surface_rect(RenderLayer.UI_TEXT, sequence_text, sequence_rect)
             
             # Draw active forces
             y_offset = 290
             if self.active_forces_display:
                 forces_label = self.font_small.render("Active Forces:", True, (255, 255, 0))  # Yellow
                 forces_rect = forces_label.get_rect(center=(self.screen.get_width() // 2, y_offset))
-                self.screen.blit(forces_label, forces_rect)
+                self.renderer.add_surface_rect(RenderLayer.UI_TEXT, forces_label, forces_rect)
                 y_offset += 30
                 
                 for force_info in self.active_forces_display:
@@ -1776,12 +1787,12 @@ class TouchScreenApp:
                         color
                     )
                     force_rect = force_text.get_rect(center=(self.screen.get_width() // 2, y_offset))
-                    self.screen.blit(force_text, force_rect)
+                    self.renderer.add_surface_rect(RenderLayer.UI_TEXT, force_text, force_rect)
                     y_offset += 25
             else:
                 no_forces_text = self.font_small.render("No active forces", True, (128, 128, 128))
                 no_forces_rect = no_forces_text.get_rect(center=(self.screen.get_width() // 2, y_offset))
-                self.screen.blit(no_forces_text, no_forces_rect)
+                self.renderer.add_surface_rect(RenderLayer.UI_TEXT, no_forces_text, no_forces_rect)
                 y_offset += 30
             
             y_offset += 10
@@ -1801,7 +1812,7 @@ class TouchScreenApp:
                 color
             )
             sensor_rect = sensor_text.get_rect(center=(self.screen.get_width() // 2, y_offset))
-            self.screen.blit(sensor_text, sensor_rect)
+            self.renderer.add_surface_rect(RenderLayer.UI_TEXT, sensor_text, sensor_rect)
             y_offset += 35
         
         # Draw instructions
@@ -1819,7 +1830,7 @@ class TouchScreenApp:
                     (200, 200, 200)  # Light gray
                 )
                 inst_rect = inst_text.get_rect(center=(self.screen.get_width() // 2, instructions_y))
-                self.screen.blit(inst_text, inst_rect)
+                self.renderer.add_surface_rect(RenderLayer.UI_TEXT, inst_text, inst_rect)
                 instructions_y += 30
         
         # Draw FPS if enabled
@@ -1829,7 +1840,7 @@ class TouchScreenApp:
                 True,
                 tuple(self.theme['text_color'])
             )
-            self.screen.blit(fps_text, (10, 10))
+            self.renderer.add_surface(RenderLayer.UI_TEXT, fps_text, (10, 10))
         
         # Draw particle count and flattened count
         flattened_count = sum(1 for p in self.particles if p.get("state") == "flattened")
@@ -1838,7 +1849,7 @@ class TouchScreenApp:
             True,
             tuple(self.theme['text_color'])
         )
-        self.screen.blit(particle_text, (10, 50))
+        self.renderer.add_surface(RenderLayer.UI_TEXT, particle_text, (10, 50))
         
         # Draw available sequences info
         if len(self.force_sequences) > 0:
@@ -1847,46 +1858,51 @@ class TouchScreenApp:
                 True,
                 (150, 150, 150)  # Gray
             )
-            self.screen.blit(seq_text, (10, self.screen_height - 80))
+            self.renderer.add_surface(RenderLayer.UI_TEXT, seq_text, (10, self.screen_height - 80))
         
         # Draw hallway wireframe (before particles so it appears behind)
-        self._draw_hallway_wireframe()
+        self.renderer.add_draw_operation(RenderLayer.WIREFRAME, self._get_hallway_wireframe_draw_func())
         
         # Draw particles using metaball rendering with flattening near decagon boundaries
         if len(self.particles) > 0:
-            draw_metaballs(self.screen, self.particles, self.screen_width, self.screen_height, 
-                          boundaries=self.boundary_segments if hasattr(self, 'boundary_segments') else None,
-                          margin=30,
-                          decagon_center_x=self.decagon_center_x if hasattr(self, 'decagon_center_x') else None,
-                          decagon_center_y=self.decagon_center_y if hasattr(self, 'decagon_center_y') else None,
-                          decagon_radius=self.decagon_radius if hasattr(self, 'decagon_radius') else None)
+            def draw_particles_func(screen):
+                draw_metaballs(screen, self.particles, self.screen_width, self.screen_height, 
+                              boundaries=self.boundary_segments if hasattr(self, 'boundary_segments') else None,
+                              margin=30,
+                              decagon_center_x=self.decagon_center_x if hasattr(self, 'decagon_center_x') else None,
+                              decagon_center_y=self.decagon_center_y if hasattr(self, 'decagon_center_y') else None,
+                              decagon_radius=self.decagon_radius if hasattr(self, 'decagon_radius') else None)
+            self.renderer.add_draw_operation(RenderLayer.PARTICLES, draw_particles_func)
         
         # Draw heart image over emitter area (event horizon)
         if hasattr(self, 'heart_image') and self.heart_image is not None:
             heart_rect = self.heart_image.get_rect()
             heart_rect.center = (self.blob_center_x, self.blob_center_y)
-            self.screen.blit(self.heart_image, heart_rect)
+            self.renderer.add_surface_rect(RenderLayer.HEART_IMAGE, self.heart_image, heart_rect)
         
         # Draw emitter indicators (small circles showing emitter positions)
-        for emitter in self.emitters:
-            pos = emitter.get_position()
-            # Draw a small circle at emitter position
-            # Color intensity based on sensor value
-            sensor_idx = self.emitters.index(emitter)
-            sensor_val = self.sensor_values[sensor_idx] if sensor_idx < len(self.sensor_values) else 0.0
-            intensity = int(100 + sensor_val * 155)
-            color = (intensity, intensity // 2, intensity // 3)
-            pygame.draw.circle(self.screen, color, (int(pos[0]), int(pos[1])), 8)
+        def draw_emitter_indicators_func(screen):
+            for emitter in self.emitters:
+                pos = emitter.get_position()
+                # Draw a small circle at emitter position
+                # Color intensity based on sensor value
+                sensor_idx = self.emitters.index(emitter)
+                sensor_val = self.sensor_values[sensor_idx] if sensor_idx < len(self.sensor_values) else 0.0
+                intensity = int(100 + sensor_val * 155)
+                color = (intensity, intensity // 2, intensity // 3)
+                pygame.draw.circle(screen, color, (int(pos[0]), int(pos[1])), 8)
+        self.renderer.add_draw_operation(RenderLayer.EMITTER_INDICATORS, draw_emitter_indicators_func)
         
         # Draw close button if screen has been clicked and button is visible
         if self.screen_clicked and self.button_alpha > 0:
-            self.draw_close_button()
+            button_surface, button_rect = self._get_close_button_surface()
+            self.renderer.add_surface_rect(RenderLayer.CLOSE_BUTTON, button_surface, button_rect)
         
-        # Update display
-        pygame.display.flip()
+        # Render everything (this flips the display)
+        self.renderer.render()
     
-    def draw_close_button(self):
-        """Draw the close button in the top-right corner"""
+    def _get_close_button_surface(self):
+        """Get the close button surface"""
         button_rect = self.get_button_rect()
         button_surface = pygame.Surface((self.button_size, self.button_size), pygame.SRCALPHA)
         
@@ -1911,7 +1927,7 @@ class TouchScreenApp:
             line_width
         )
         
-        self.screen.blit(button_surface, button_rect)
+        return button_surface, button_rect
     
     def run(self):
         """Main application loop"""
