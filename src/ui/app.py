@@ -13,6 +13,7 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime as dt
+from functools import lru_cache
 
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -54,6 +55,8 @@ RENDER_SCALE = 4
 ISO_THRESHOLD = 1.15
 FIELD_STRENGTH = 30.0  # Adjusted for smaller particles
 FIELD_SOFTEN = 1.5  # Adjusted for smaller particles to maintain smooth blob appearance
+METABALL_RENDER_MODE = "splat"  # "splat" (fast) or "field" (accurate)
+SPLAT_MAX_RADIUS = 12
 
 # Emission defaults (will be controlled by sensors)
 BASE_PARTICLE_SPEED = 520
@@ -142,19 +145,29 @@ def neighbor_cells(cx, cy):
             yield (cx + ox, cy + oy)
 
 
+@lru_cache(maxsize=8)
+def _get_metaball_grid(width: int, height: int) -> Tuple[np.ndarray, np.ndarray]:
+    w2, h2 = width // RENDER_SCALE, height // RENDER_SCALE
+    ys = np.arange(h2, dtype=np.float32)[:, None]
+    xs = np.arange(w2, dtype=np.float32)[None, :]
+    return xs, ys
+
+
 def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30, decagon_center_x=None, decagon_center_y=None, decagon_radius=None):
     """
     Draw particles using metaball rendering with flattening near decagon boundaries
     boundaries: List of boundary segments for flattening calculation
     decagon_center_x, decagon_center_y, decagon_radius: Decagon boundary parameters
     """
+    if METABALL_RENDER_MODE == "splat":
+        return draw_metaballs_splat(screen, particles, width, height)
+
     # Low-res buffer
     w2, h2 = width // RENDER_SCALE, height // RENDER_SCALE
     field = np.zeros((h2, w2), dtype=np.float32)
 
     # Precompute a grid of pixel coordinates (low-res)
-    ys = np.arange(h2, dtype=np.float32)[:, None]
-    xs = np.arange(w2, dtype=np.float32)[None, :]
+    xs, ys = _get_metaball_grid(width, height)
 
     # Add each particle's contribution to the field
     for p in particles:
@@ -224,6 +237,25 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30,
                 
                 flatten_strength = clamp(flatten_strength, 0.0, 1.0)
         
+        depth_field_strength = FIELD_STRENGTH * scale
+        depth_field_soften = FIELD_SOFTEN * scale
+        max_radius_sq = (depth_field_strength / ISO_THRESHOLD) - depth_field_soften
+        if max_radius_sq <= 0:
+            continue
+        influence_radius = math.sqrt(max_radius_sq)
+        if flatten_strength > 0.0:
+            influence_radius *= 1.4
+
+        x0 = max(int(cx - influence_radius), 0)
+        x1 = min(int(cx + influence_radius) + 1, w2)
+        y0 = max(int(cy - influence_radius), 0)
+        y1 = min(int(cy + influence_radius) + 1, h2)
+        if x1 <= x0 or y1 <= y0:
+            continue
+
+        xs_slice = xs[:, x0:x1]
+        ys_slice = ys[y0:y1, :]
+
         # Apply flattening based on decagon surface normal
         if flatten_strength > 0.0 and (normal_x != 0.0 or normal_y != 0.0):
             # Flattening: make blob wider perpendicular to surface normal, shorter parallel to normal
@@ -236,8 +268,8 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30,
             
             # Transform coordinates: spread along tangent, squash along normal
             # Project (xs-cx, ys-cy) onto normal and tangent
-            dx_local = xs - cx
-            dy_local = ys - cy
+            dx_local = xs_slice - cx
+            dy_local = ys_slice - cy
             
             # Project onto normal and tangent using numpy operations
             dot_normal = dx_local * normal_x + dy_local * normal_y
@@ -247,17 +279,13 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30,
             dx = dot_tangent / (1.0 + flatten_strength * flatten_mult * 0.5)  # Spread perpendicular
             dy = dot_normal * (1.0 + flatten_strength * flatten_mult)  # Squash parallel
             
-            depth_field_strength = FIELD_STRENGTH * scale
-            depth_field_soften = FIELD_SOFTEN * scale
-            field += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
+            field[y0:y1, x0:x1] += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
         else:
             # Normal circular field for particles far from boundaries
             # Scale field strength by depth (farther particles contribute less)
-            depth_field_strength = FIELD_STRENGTH * scale
-            depth_field_soften = FIELD_SOFTEN * scale
-            dx = xs - cx
-            dy = ys - cy
-            field += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
+            dx = xs_slice - cx
+            dy = ys_slice - cy
+            field[y0:y1, x0:x1] += depth_field_strength / (dx*dx + dy*dy + depth_field_soften)
 
     # Threshold to get silhouette
     mask = field >= ISO_THRESHOLD
@@ -269,6 +297,66 @@ def draw_metaballs(screen, particles, width, height, boundaries=None, margin=30,
     surf = pygame.surfarray.make_surface(img.swapaxes(0, 1))
     surf = pygame.transform.smoothscale(surf, (width, height))
     # Set black as the colorkey to make background transparent
+    surf.set_colorkey((0, 0, 0))
+    screen.blit(surf, (0, 0))
+
+
+@lru_cache(maxsize=64)
+def _get_splat_kernel(radius: int) -> np.ndarray:
+    size = radius * 2 + 1
+    ys = np.arange(size, dtype=np.float32)[:, None] - radius
+    xs = np.arange(size, dtype=np.float32)[None, :] - radius
+    kernel = FIELD_STRENGTH / (xs * xs + ys * ys + FIELD_SOFTEN)
+    return kernel.astype(np.float32)
+
+
+def draw_metaballs_splat(screen, particles, width, height):
+    """Fast metaball rendering using cached kernels and local splats."""
+    w2, h2 = width // RENDER_SCALE, height // RENDER_SCALE
+    field = np.zeros((h2, w2), dtype=np.float32)
+
+    for p in particles:
+        x, y = p["body"].position
+        z_depth = p.get("z_depth", NEAR_PLANE_Z)
+
+        proj_x, proj_y, scale = project_3d_to_2d(x, y, z_depth, width, height)
+        cx = proj_x / RENDER_SCALE
+        cy = proj_y / RENDER_SCALE
+
+        depth_field_strength = FIELD_STRENGTH * scale
+        depth_field_soften = FIELD_SOFTEN * scale
+        max_radius_sq = (depth_field_strength / ISO_THRESHOLD) - depth_field_soften
+        if max_radius_sq <= 0:
+            continue
+        influence_radius = math.sqrt(max_radius_sq)
+        radius = max(2, min(SPLAT_MAX_RADIUS, int(influence_radius)))
+        kernel = _get_splat_kernel(radius) * scale
+
+        x0 = int(cx) - radius
+        y0 = int(cy) - radius
+        x1 = x0 + kernel.shape[1]
+        y1 = y0 + kernel.shape[0]
+
+        if x1 <= 0 or y1 <= 0 or x0 >= w2 or y0 >= h2:
+            continue
+
+        sx0 = max(0, x0)
+        sy0 = max(0, y0)
+        sx1 = min(w2, x1)
+        sy1 = min(h2, y1)
+
+        kx0 = sx0 - x0
+        ky0 = sy0 - y0
+        kx1 = kx0 + (sx1 - sx0)
+        ky1 = ky0 + (sy1 - sy0)
+
+        field[sy0:sy1, sx0:sx1] += kernel[ky0:ky1, kx0:kx1]
+
+    mask = field >= ISO_THRESHOLD
+    img = np.zeros((h2, w2, 3), dtype=np.uint8)
+    img[mask] = (120, 190, 255)
+    surf = pygame.surfarray.make_surface(img.swapaxes(0, 1))
+    surf = pygame.transform.smoothscale(surf, (width, height))
     surf.set_colorkey((0, 0, 0))
     screen.blit(surf, (0, 0))
 
