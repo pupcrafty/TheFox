@@ -1,0 +1,20 @@
+FPS Log - Started at 2026-01-12 18:42:12
+========================================================================================================================
+Timestamp | FPS | Avg | Min | Max | Frames | Update(ms) | Draw(ms)
+========================================================================================================================
+2026-01-12 18:42:18.026 | FPS: 0.00 | Avg: 0.00 | Min: 0.00 | Max: 0.00 | Frames: 1 | Update: 44.0ms (max: 44.0ms) | Draw: 5612.0ms (max: 5612.0ms)
+2026-01-12 18:42:22.986 | FPS: 0.00 | Avg: 0.00 | Min: 0.00 | Max: 0.00 | Frames: 2 | Update: 43.0ms (max: 43.0ms) | Draw: 4912.0ms (max: 4912.0ms)
+2026-01-12 18:42:28.078 | FPS: 0.00 | Avg: 0.00 | Min: 0.00 | Max: 0.00 | Frames: 3 | Update: 38.0ms (max: 38.0ms) | Draw: 5054.0ms (max: 5054.0ms)
+2026-01-12 18:42:32.528 | FPS: 0.00 | Avg: 0.00 | Min: 0.00 | Max: 0.00 | Frames: 4 | Update: 55.0ms (max: 55.0ms) | Draw: 4393.0ms (max: 4393.0ms)
+2026-01-12 18:42:36.700 | FPS: 0.00 | Avg: 0.00 | Min: 0.00 | Max: 0.00 | Frames: 5 | Update: 41.0ms (max: 41.0ms) | Draw: 4131.0ms (max: 4131.0ms)
+2026-01-12 18:42:40.500 | FPS: 0.00 | Avg: 0.00 | Min: 0.00 | Max: 0.00 | Frames: 6 | Update: 40.0ms (max: 40.0ms) | Draw: 3759.0ms (max: 3759.0ms)
+2026-01-12 18:42:44.076 | FPS: 0.00 | Avg: 0.00 | Min: 0.00 | Max: 0.00 | Frames: 7 | Update: 50.0ms (max: 50.0ms) | Draw: 3525.0ms (max: 3525.0ms)
+2026-01-12 18:42:47.504 | FPS: 0.00 | Avg: 0.00 | Min: 0.00 | Max: 0.00 | Frames: 8 | Update: 40.0ms (max: 40.0ms) | Draw: 3387.0ms (max: 3387.0ms)
+2026-01-12 18:42:50.897 | FPS: 0.00 | Avg: 0.00 | Min: 0.00 | Max: 0.00 | Frames: 9 | Update: 41.0ms (max: 41.0ms) | Draw: 3350.0ms (max: 3350.0ms)
+2026-01-12 18:42:54.091 | FPS: 0.00 | Avg: 0.00 | Min: 0.00 | Max: 0.00 | Frames: 10 | Update: 41.0ms (max: 41.0ms) | Draw: 3152.0ms (max: 3152.0ms)
+2026-01-12 18:42:57.300 | FPS: 0.25 | Avg: 0.25 | Min: 0.25 | Max: 0.25 | Frames: 11 | Update: 44.0ms (max: 44.0ms) | Draw: 3166.0ms (max: 3166.0ms)
+2026-01-12 18:43:00.580 | FPS: 0.25 | Avg: 0.25 | Min: 0.25 | Max: 0.25 | Frames: 12 | Update: 44.0ms (max: 44.0ms) | Draw: 3235.0ms (max: 3235.0ms)
+2026-01-12 18:43:03.863 | FPS: 0.25 | Avg: 0.25 | Min: 0.25 | Max: 0.25 | Frames: 13 | Update: 43.0ms (max: 43.0ms) | Draw: 3241.0ms (max: 3241.0ms)
+2026-01-12 18:43:07.231 | FPS: 0.25 | Avg: 0.25 | Min: 0.25 | Max: 0.25 | Frames: 14 | Update: 42.0ms (max: 42.0ms) | Draw: 3325.0ms (max: 3325.0ms)
+2026-01-12 18:43:10.709 | FPS: 0.25 | Avg: 0.25 | Min: 0.25 | Max: 0.25 | Frames: 15 | Update: 41.0ms (max: 41.0ms) | Draw: 3438.0ms (max: 3438.0ms)
+2026-01-12 18:43:14.347 | FPS: 0.25 | Avg: 0.25 | Min: 0.25 | Max: 0.25 | Frames: 16 | Update: 42.0ms (max: 42.0ms) | Draw: 3584.0ms (max: 3584.0ms)
