@@ -22,7 +22,10 @@ def main():
         print("\nApplication interrupted by user")
         sys.exit(0)
     except Exception as e:
+        import traceback
         print(f"Error: {e}")
+        print("\nFull traceback:")
+        traceback.print_exc()
         sys.exit(1)
 
 

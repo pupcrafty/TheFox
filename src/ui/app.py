@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
+from datetime import datetime as dt
 
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.config import load_all_config
 from hardware.arduino_interface import ArduinoInterface
 from ui.renderer import Renderer, RenderLayer
+from ui.tiles import TileManager
 import pymunk
 import numpy as np
 
@@ -101,7 +103,11 @@ def project_3d_to_2d(x, y, z, screen_width, screen_height):
 
 def get_perspective_scale(z):
     """Get scale factor for object at depth z"""
-    return PERSPECTIVE_FOV / (PERSPECTIVE_FOV + z)
+    # Safety check: prevent division by zero
+    denominator = PERSPECTIVE_FOV + z
+    if abs(denominator) < 1e-6:  # Very small or zero
+        return 1.0  # Default scale
+    return PERSPECTIVE_FOV / denominator
 
 
 def generate_decagon_vertices(center_x, center_y, radius):
@@ -390,6 +396,19 @@ class TouchScreenApp:
         self.clock = pygame.time.Clock()
         self.fps = display_config['fps']
         
+        # FPS logging
+        self.fps_log_enabled = True
+        # Create logs directory if it doesn't exist
+        logs_dir = Path(__file__).parent.parent.parent / "logs"
+        logs_dir.mkdir(exist_ok=True)
+        # Create timestamped log file
+        timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
+        self.fps_log_path = logs_dir / f"fps_log_{timestamp}.txt"
+        self.fps_log_interval = 1.0  # Log FPS every 1 second
+        self.fps_log_last_time = 0.0
+        self.fps_samples = []  # Store FPS samples for averaging
+        self.frame_count = 0
+        
         # Initialize Arduino interface
         self.arduino = ArduinoInterface()
         arduino_config = self.config.get('arduino', {})
@@ -491,6 +510,17 @@ class TouchScreenApp:
         # Time tracking
         self.last_update_time = pygame.time.get_ticks()
         
+        # Performance profiling
+        self.profile_enabled = True
+        self.profile_data = {
+            'update_time': [],
+            'draw_time': [],
+            'tile_draw_time': [],
+            'sprite_draw_time': [],
+            'num_tiles': [],
+            'num_particles': []
+        }
+        
         # Close button properties
         self.button_size = 60
         self.button_padding = 20
@@ -500,8 +530,15 @@ class TouchScreenApp:
         self.hallway_segments = []  # List of hallway segment positions for wireframe
         self._initialize_hallway_segments()
         
+        # Initialize tile manager for hallway tiling (sprite surfaces will be set after loading)
+        self.tile_manager = TileManager(tile_size=40.0, tile_color=(128, 128, 128))
+        # Initial tile generation will happen in update() with proper screen dimensions
+        
         # Load heart image
         self._load_heart_image()
+        
+        # Load sprite tiles and data
+        self._load_sprite_tiles()
         
         print("TouchScreenApp initialized successfully")
     
@@ -689,6 +726,57 @@ class TouchScreenApp:
             print(f"Warning: Could not load heart image: {e}")
             self.heart_image = None
             self.heart_size = 0
+    
+    def _load_sprite_tiles(self):
+        """Load sprite sheet and tile data for hallway surfaces"""
+        try:
+            # Load sprite sheet image
+            sprite_path = Path(__file__).parent.parent.parent / "assets" / "images" / "test_pipes.png"
+            if sprite_path.exists():
+                self.sprite_sheet = pygame.image.load(str(sprite_path)).convert_alpha()
+                print(f"Loaded sprite sheet: {sprite_path}")
+            else:
+                print(f"Warning: Sprite sheet not found at {sprite_path}")
+                self.sprite_sheet = None
+                self.tile_data = []
+                return
+            
+            # Load tile data JSON
+            data_path = Path(__file__).parent.parent.parent / "assets" / "data" / "squares_data_unique.json"
+            if data_path.exists():
+                with open(data_path, 'r') as f:
+                    self.tile_data = json.load(f)
+                print(f"Loaded {len(self.tile_data)} tile definitions")
+            else:
+                print(f"Warning: Tile data not found at {data_path}")
+                self.tile_data = []
+                return
+            
+            # Pre-extract tile surfaces for faster rendering
+            self.tile_surfaces = []
+            for tile_info in self.tile_data:
+                x = tile_info.get("sprite_x", 0)
+                y = tile_info.get("sprite_y", 0)
+                w = tile_info.get("sprite_width", 180)
+                h = tile_info.get("sprite_height", 180)
+                
+                # Extract tile from sprite sheet
+                tile_surface = pygame.Surface((w, h), pygame.SRCALPHA)
+                tile_surface.blit(self.sprite_sheet, (0, 0), (x, y, w, h))
+                self.tile_surfaces.append(tile_surface)
+            
+            print(f"Pre-extracted {len(self.tile_surfaces)} tile surfaces")
+            
+            # Update tile manager with sprite surfaces
+            if hasattr(self, 'tile_manager'):
+                self.tile_manager.sprite_surfaces = self.tile_surfaces
+                print(f"Updated tile manager with {len(self.tile_surfaces)} sprite surfaces")
+            
+        except Exception as e:
+            print(f"Warning: Could not load sprite tiles: {e}")
+            self.sprite_sheet = None
+            self.tile_data = []
+            self.tile_surfaces = []
     
     def _disable_particle_collisions(self, particle):
         """
@@ -1279,6 +1367,14 @@ class TouchScreenApp:
         # Update hallway segments for wireframe visualization
         self._update_hallway_segments(dt)
         
+        # Update tiles for hallway segments (generate in screen space like wireframe)
+        self.tile_manager.update_tiles_for_segments(
+            self.hallway_segments,
+            self.screen_width, self.screen_height,
+            PERSPECTIVE_FOV, VANISHING_POINT_Y,
+            generate_floor=True
+        )
+        
         # Update sequence time (in seconds)
         self.sequence_time = current_time / 1000.0
         
@@ -1762,6 +1858,15 @@ class TouchScreenApp:
             )
             self.renderer.add_surface(RenderLayer.UI_TEXT, seq_text, (10, self.screen_height - 80))
         
+        # Draw hallway tiles (before wireframe so it appears behind)
+        tile_draw_func = self.tile_manager.get_draw_function(
+            self.screen_width, self.screen_height,
+            PERSPECTIVE_FOV, VANISHING_POINT_Y,
+            NEAR_PLANE_Z, FAR_PLANE_Z,
+            font=getattr(self, 'font', None) or getattr(self, 'font_small', None)
+        )
+        self.renderer.add_draw_operation(RenderLayer.TILES, tile_draw_func)
+        
         # Draw hallway wireframe (before particles so it appears behind)
         self.renderer.add_draw_operation(RenderLayer.WIREFRAME, self._get_hallway_wireframe_draw_func())
         
@@ -1831,14 +1936,95 @@ class TouchScreenApp:
         
         return button_surface, button_rect
     
+    def _log_fps(self, current_time: float, update_time: float = 0, draw_time: float = 0, frame_time: float = 0):
+        """Log FPS to file with performance breakdown"""
+        if not self.fps_log_enabled:
+            return
+        
+        # Get current FPS
+        current_fps = self.clock.get_fps()
+        
+        # Collect sample
+        self.fps_samples.append(current_fps)
+        self.frame_count += 1
+        
+        # Store performance data
+        if self.profile_enabled:
+            if update_time > 0:
+                self.profile_data['update_time'].append(update_time)
+            if draw_time > 0:
+                self.profile_data['draw_time'].append(draw_time)
+        
+        # Log periodically (every fps_log_interval seconds)
+        elapsed = current_time - self.fps_log_last_time
+        if elapsed >= self.fps_log_interval:
+            # Calculate statistics
+            if self.fps_samples:
+                avg_fps = sum(self.fps_samples) / len(self.fps_samples)
+                min_fps = min(self.fps_samples)
+                max_fps = max(self.fps_samples)
+                
+                # Calculate average times
+                avg_update = sum(self.profile_data['update_time']) / len(self.profile_data['update_time']) if self.profile_data['update_time'] else 0
+                avg_draw = sum(self.profile_data['draw_time']) / len(self.profile_data['draw_time']) if self.profile_data['draw_time'] else 0
+                max_update = max(self.profile_data['update_time']) if self.profile_data['update_time'] else 0
+                max_draw = max(self.profile_data['draw_time']) if self.profile_data['draw_time'] else 0
+                
+                # Write to log file
+                try:
+                    with open(self.fps_log_path, 'a') as f:
+                        timestamp = dt.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                        f.write(f"{timestamp} | FPS: {current_fps:.2f} | "
+                               f"Avg: {avg_fps:.2f} | Min: {min_fps:.2f} | Max: {max_fps:.2f} | "
+                               f"Frames: {self.frame_count} | "
+                               f"Update: {avg_update:.1f}ms (max: {max_update:.1f}ms) | "
+                               f"Draw: {avg_draw:.1f}ms (max: {max_draw:.1f}ms)\n")
+                except Exception as e:
+                    print(f"Warning: Could not write to FPS log: {e}")
+            
+            # Reset for next interval
+            self.fps_samples = []
+            self.profile_data['update_time'] = []
+            self.profile_data['draw_time'] = []
+            self.fps_log_last_time = current_time
+    
     def run(self):
         """Main application loop"""
         print("Starting application...")
+        print(f"FPS logging enabled: {self.fps_log_enabled}")
+        if self.fps_log_enabled:
+            print(f"FPS log file: {self.fps_log_path}")
+            # Initialize log file with header
+            try:
+                with open(self.fps_log_path, 'w') as f:
+                    f.write("FPS Log - Started at " + dt.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
+                    f.write("=" * 120 + "\n")
+                    f.write("Timestamp | FPS | Avg | Min | Max | Frames | Update(ms) | Draw(ms)\n")
+                    f.write("=" * 120 + "\n")
+            except Exception as e:
+                print(f"Warning: Could not initialize FPS log file: {e}")
+        
+        start_time = pygame.time.get_ticks() / 1000.0
+        self.fps_log_last_time = start_time
+        
         while self.running:
+            frame_start = pygame.time.get_ticks()
+            
             self.handle_events()
+            update_start = pygame.time.get_ticks()
             self.update()
+            update_time = pygame.time.get_ticks() - update_start
+            
+            draw_start = pygame.time.get_ticks()
             self.draw()
+            draw_time = pygame.time.get_ticks() - draw_start
+            
             self.clock.tick(self.fps)
+            
+            # Log FPS and performance data
+            current_time = pygame.time.get_ticks() / 1000.0
+            frame_time = pygame.time.get_ticks() - frame_start
+            self._log_fps(current_time, update_time, draw_time, frame_time)
         
         # Cleanup
         self.cleanup()

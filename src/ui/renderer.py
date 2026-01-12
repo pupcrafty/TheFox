@@ -12,6 +12,7 @@ from enum import IntEnum
 class RenderLayer(IntEnum):
     """Layer ordering for rendering (lower = drawn first, appears behind)"""
     BACKGROUND = 0
+    TILES = 5
     WIREFRAME = 10
     PARTICLES = 20
     HEART_IMAGE = 30
