@@ -1,51 +1,91 @@
-#!/usr/bin/env python3
-"""
-Configuration management module
-"""
+"""Configuration models and loaders."""
+from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, Tuple
 
 
-def load_app_config() -> Dict[str, Any]:
-    """Load application configuration from JSON file"""
-    base_path = Path(__file__).parent.parent.parent
-    config_path = base_path / "config" / "app_config.json"
-    
-    with open(config_path, 'r') as f:
-        return json.load(f)
+@dataclass(frozen=True)
+class WindowConfig:
+    size: Tuple[int, int]
+    fullscreen: bool
+    title: str
+    target_fps: int
+    background_color: Tuple[int, int, int]
 
 
-def load_arduino_config() -> Dict[str, Any]:
-    """Load Arduino configuration from JSON file"""
-    base_path = Path(__file__).parent.parent.parent
-    config_path = base_path / "config" / "arduino_config.json"
-    
-    with open(config_path, 'r') as f:
-        return json.load(f)
+@dataclass(frozen=True)
+class ParticleConfig:
+    max_particles: int
+    emitter_strength: float
+    gravity: float
+    viscosity: float
+    cohesion: float
 
 
-def load_stick_figure_config() -> Dict[str, Any]:
-    """Load stick figure physics configuration from JSON file"""
-    base_path = Path(__file__).parent.parent.parent
-    config_path = base_path / "config" / "stick_figure_config.json"
-    
-    try:
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"Warning: stick_figure_config.json not found at {config_path}, using defaults")
-        return {}
+@dataclass(frozen=True)
+class CorridorConfig:
+    segment_count: int
+    segment_spacing: float
+    scroll_speed: float
+    wall_color: Tuple[int, int, int]
 
 
-def load_all_config() -> Dict[str, Any]:
-    """Load all configuration files into a single dictionary"""
-    config = load_app_config()
-    config['arduino'] = load_arduino_config()
-    config['stick_figure'] = load_stick_figure_config()
-    return config
+@dataclass(frozen=True)
+class AppConfig:
+    window: WindowConfig
+    particles: ParticleConfig
+    corridor: CorridorConfig
 
 
+@dataclass(frozen=True)
+class ArduinoConfig:
+    enabled: bool
+    port: str
+    baud_rate: int
+    sensor_count: int
 
 
+def _load_json(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text())
+
+
+def load_app_config(path: Path) -> AppConfig:
+    payload = _load_json(path)
+
+    window = WindowConfig(
+        size=tuple(payload["window"]["size"]),
+        fullscreen=payload["window"]["fullscreen"],
+        title=payload["window"]["title"],
+        target_fps=payload["window"]["target_fps"],
+        background_color=tuple(payload["window"]["background_color"]),
+    )
+
+    particles = ParticleConfig(
+        max_particles=payload["particles"]["max_particles"],
+        emitter_strength=payload["particles"]["emitter_strength"],
+        gravity=payload["particles"]["gravity"],
+        viscosity=payload["particles"]["viscosity"],
+        cohesion=payload["particles"]["cohesion"],
+    )
+
+    corridor = CorridorConfig(
+        segment_count=payload["corridor"]["segment_count"],
+        segment_spacing=payload["corridor"]["segment_spacing"],
+        scroll_speed=payload["corridor"]["scroll_speed"],
+        wall_color=tuple(payload["corridor"]["wall_color"]),
+    )
+
+    return AppConfig(window=window, particles=particles, corridor=corridor)
+
+
+def load_arduino_config(path: Path) -> ArduinoConfig:
+    payload = _load_json(path)
+    return ArduinoConfig(
+        enabled=payload["enabled"],
+        port=payload["port"],
+        baud_rate=payload["baud_rate"],
+        sensor_count=payload["sensor_count"],
+    )

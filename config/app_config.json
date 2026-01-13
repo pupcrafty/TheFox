@@ -1,26 +1,22 @@
 {
-  "display": {
-    "width": 800,
-    "height": 480,
-    "fullscreen": true,
-    "fps": 60
+  "window": {
+    "size": [720, 1280],
+    "fullscreen": false,
+    "title": "TheFox - Particle Corridor",
+    "target_fps": 30,
+    "background_color": [6, 10, 18]
   },
-  "touch": {
-    "sensitivity": 1.0,
-    "enable_multitouch": false
+  "particles": {
+    "max_particles": 2200,
+    "emitter_strength": 1.5,
+    "gravity": 180.0,
+    "viscosity": 0.18,
+    "cohesion": 0.35
   },
-  "theme": {
-    "background_color": [20, 20, 30],
-    "primary_color": [100, 150, 255],
-    "secondary_color": [255, 150, 100],
-    "text_color": [255, 255, 255]
-  },
-  "debug": {
-    "show_fps": false,
-    "log_level": "INFO"
+  "corridor": {
+    "segment_count": 18,
+    "segment_spacing": 22.0,
+    "scroll_speed": 0.8,
+    "wall_color": [70, 120, 180]
   }
 }
-
-
-
-

@@ -1,145 +1,60 @@
-# Raspberry Pi Touch Screen Project
+# TheFox
 
-A fun interactive visual program built with Pygame, designed to run on a Raspberry Pi with a touch screen interface. The project integrates Arduino peripherals for additional input capabilities.
+An interactive particle-physics and pseudo-3D corridor experience designed for Raspberry Pi touch screens with Arduino sensor input. This repository now focuses on a fresh architecture built directly from the project goals.
 
-## Project Overview
+## Vision
 
-This project creates an engaging touch-based interactive application that combines:
-- **Visual Interface**: Pygame-based graphics optimized for Raspberry Pi touch screens
-- **Touch Input**: Full touch screen support for user interaction
-- **Arduino Integration**: Peripheral input devices connected via Arduino board for additional sensor/button inputs
+TheFox blends a fluid particle simulation (SPH-inspired) with a scrolling 3D corridor rendered as a decagon tunnel. The experience is tuned for 9:16 portrait displays, real-time sensor interaction, and long-running installations.
 
-## Hardware Requirements
+## Key Goals
 
-- Raspberry Pi (3B+, 4, or newer recommended)
-- Touch screen display (compatible with Raspberry Pi)
-- Arduino board (Uno, Nano, or compatible)
-- USB cable for Arduino connection
-- Power supply for Raspberry Pi
-
-## Software Requirements
-
-- Raspberry Pi OS (Raspberry Pi OS with Desktop recommended)
-- Python 3.7 or higher
-- Pygame library
-- PySerial library for Arduino communication
+- **Fluid-like particle system** with up to 2,200 particles, SPH-inspired forces, and metaball-style visuals.
+- **3D corridor illusion** using decagonal segments and perspective scaling.
+- **Arduino sensors** mapped to four corner emitters for responsive control.
+- **Touch-first UI** optimized for Raspberry Pi portrait displays.
 
 ## Project Structure
 
 ```
 TheFox/
-├── README.md                 # This file
-├── requirements.txt          # Python dependencies
-├── config/                   # Configuration files
-│   ├── app_config.json      # Application settings
-│   └── arduino_config.json  # Arduino communication settings
-├── src/                      # Main application source code
-│   ├── main.py              # Entry point for the application
-│   ├── ui/                  # User interface modules
-│   │   ├── __init__.py
-│   │   └── app.py           # Main Pygame application class
-│   ├── hardware/            # Hardware interface modules
-│   │   ├── __init__.py
-│   │   └── arduino_interface.py  # Arduino communication module
-│   ├── core/                # Core application modules
-│   │   ├── __init__.py
-│   │   └── config.py        # Configuration management
-│   └── utils/               # Utility modules
-│       ├── __init__.py
-│       └── helpers.py       # Helper functions
-├── arduino/                  # Arduino firmware
-│   └── firmware.ino         # Arduino sketch
-├── assets/                   # Media assets
-│   ├── images/              # Image files
-│   ├── sounds/              # Sound files
-│   └── fonts/               # Font files
-└── docs/                     # Documentation
-    └── SETUP.md             # Setup and installation guide
+├── config/
+│   ├── app_config.json
+│   ├── arduino_config.json
+│   └── force_sequences.json
+├── docs/
+│   ├── PROJECT_GOALS.md
+│   └── SETUP.md
+├── src/
+│   ├── app/                # Application orchestration
+│   ├── core/               # Configuration models
+│   ├── hardware/           # Arduino helpers
+│   ├── input/              # Touch + sensor adapters
+│   ├── physics/            # SPH-inspired particle system
+│   ├── rendering/          # Corridor + particle rendering
+│   ├── utils/              # Utilities (timing, math)
+│   └── main.py             # Entry point
+└── requirements.txt
 ```
 
-## Installation
+## Getting Started
 
-1. **Clone or download this repository**
-   ```bash
-   cd TheFox
-   ```
-
-2. **Install Python dependencies**
+1. Install dependencies:
    ```bash
    pip3 install -r requirements.txt
    ```
 
-3. **Install Pygame (if not already installed)**
-   ```bash
-   sudo apt-get update
-   sudo apt-get install python3-pygame
-   ```
+2. Configure settings in `config/app_config.json` and `config/arduino_config.json`.
 
-4. **Upload Arduino firmware**
-   - Open `arduino/firmware.ino` in Arduino IDE
-   - Upload to your Arduino board
-   - Note the COM port (will be needed for configuration)
-
-5. **Configure the application**
-   - Edit `config/app_config.json` for display settings
-   - Edit `config/arduino_config.json` to set the correct COM port for your Arduino
-
-## Running the Application
-
-1. **Ensure Arduino is connected** via USB to the Raspberry Pi
-
-2. **Run the main application**
+3. Run the application:
    ```bash
    python3 src/main.py
    ```
 
-3. **For fullscreen touch interface**, the application will automatically detect and use the touch screen
+## Next Milestones
 
-## Configuration
+- Replace placeholder particle integration with full SPH + spatial hashing.
+- Add metaball shader-based rendering for the particle blob.
+- Implement corridor tile sprite sheets and texture mapping.
+- Expand sensor mapping and force sequence playback.
 
-### Application Configuration (`config/app_config.json`)
-- Screen resolution and fullscreen settings
-- Touch sensitivity
-- Application theme and colors
-
-### Arduino Configuration (`config/arduino_config.json`)
-- Serial port (e.g., `/dev/ttyACM0` or `/dev/ttyUSB0`)
-- Baud rate (typically 9600 or 115200)
-- Timeout settings
-
-## Development
-
-### Adding Features
-- Main application logic: `src/ui/app.py`
-- Arduino communication: `src/hardware/arduino_interface.py`
-- Configuration: `src/core/config.py`
-- Utility functions: `src/utils/helpers.py`
-
-### Testing
-- Test on desktop first with a mouse (simulating touch)
-- Test Arduino connection separately before integrating
-
-## Troubleshooting
-
-### Touch Screen Not Working
-- Check display configuration: `sudo raspi-config`
-- Verify touch screen drivers are installed
-
-### Arduino Not Detected
-- Check USB connection
-- Verify COM port in `config/arduino_config.json`
-- Test connection: `ls /dev/tty*` to find Arduino device
-
-### Performance Issues
-- Reduce screen resolution if needed
-- Optimize image/sound assets
-- Close unnecessary background processes
-
-## License
-
-[Your License Here]
-
-## Author
-
-[Your Name Here]
-
+For detailed intent and success criteria, see `docs/PROJECT_GOALS.md`.

@@ -1,7 +1,1 @@
-"""
-Hardware interface modules (Arduino, sensors, etc.)
-"""
-
-
-
-
+"""Hardware integration helpers."""

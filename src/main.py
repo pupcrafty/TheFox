@@ -1,34 +1,20 @@
-#!/usr/bin/env python3
-"""
-Main entry point for the Raspberry Pi Touch Screen Application
-"""
+"""Application entry point for TheFox."""
+from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-# Add src directory to path
-src_path = Path(__file__).parent
-sys.path.insert(0, str(src_path))
-
-from ui.app import TouchScreenApp
+from app.app import TheFoxApp
+from core.config import load_app_config, load_arduino_config
 
 
-def main():
-    """Initialize and run the application"""
-    try:
-        app = TouchScreenApp()
-        app.run()
-    except KeyboardInterrupt:
-        print("\nApplication interrupted by user")
-        sys.exit(0)
-    except Exception as e:
-        import traceback
-        print(f"Error: {e}")
-        print("\nFull traceback:")
-        traceback.print_exc()
-        sys.exit(1)
+def main() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app_config = load_app_config(root / "config" / "app_config.json")
+    arduino_config = load_arduino_config(root / "config" / "arduino_config.json")
+
+    app = TheFoxApp(app_config=app_config, arduino_config=arduino_config)
+    app.run()
 
 
 if __name__ == "__main__":
     main()
-

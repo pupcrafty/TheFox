@@ -1,7 +1,1 @@
-"""
-Utility modules for the application
-"""
-
-
-
-
+"""Shared utility helpers."""

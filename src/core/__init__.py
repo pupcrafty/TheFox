@@ -1,7 +1,1 @@
-"""
-Core application modules (configuration, etc.)
-"""
-
-
-
-
+"""Core configuration and shared utilities."""
