@@ -464,21 +464,17 @@ class TouchScreenApp:
         display_config = self.config['display']
         screen_width, screen_height = self._calculate_9_16_resolution()
         
-        # Set up display
+        # Set up display (OpenGL)
+        display_flags = pygame.OPENGL | pygame.DOUBLEBUF
         if display_config['fullscreen']:
-            self.screen = pygame.display.set_mode(
-                (screen_width, screen_height),
-                pygame.FULLSCREEN
-            )
-        else:
-            self.screen = pygame.display.set_mode(
-                (screen_width, screen_height)
-            )
+            display_flags |= pygame.FULLSCREEN
+        pygame.display.set_mode((screen_width, screen_height), display_flags)
+        self.screen = pygame.Surface((screen_width, screen_height), flags=pygame.SRCALPHA)
         
         pygame.display.set_caption("Raspberry Pi Touch App")
         
         # Initialize renderer for layered drawing
-        self.renderer = Renderer(self.screen)
+        self.renderer = Renderer((screen_width, screen_height), self.screen)
         
         # Initialize clock for FPS control
         self.clock = pygame.time.Clock()
