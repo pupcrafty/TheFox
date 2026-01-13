@@ -1,141 +1,14 @@
 {
   "sequences": [
     {
-      "name": "jump",
-      "forces": [
-        {
-          "time": 0.0,
-          "target": "left_thigh",
-          "force": [0, -600],
-          "forward_push": 0.8,
-          "torque": 0,
-          "duration": 0.2,
-          "fade_type": "linear"
-        },
-        {
-          "time": 0.0,
-          "target": "right_thigh",
-          "force": [0, -600],
-          "forward_push": 0.8,
-          "torque": 0,
-          "duration": 0.2,
-          "fade_type": "linear"
-        },
-        {
-          "time": 0.1,
-          "target": "left_upper_arm",
-          "force": [0, -300],
-          "forward_push": 0.6,
-          "torque": 0,
-          "duration": 0.15,
-          "fade_type": "exponential"
-        },
-        {
-          "time": 0.1,
-          "target": "right_upper_arm",
-          "force": [0, -300],
-          "forward_push": 0.6,
-          "torque": 0,
-          "duration": 0.15,
-          "fade_type": "exponential"
-        }
-      ]
+      "name": "calm_breath",
+      "duration_seconds": 10,
+      "pattern": [0.1, 0.2, 0.4, 0.2]
     },
     {
-      "name": "spin",
-      "forces": [
-        {
-          "time": 0.0,
-          "target": "left_upper_arm",
-          "force": [200, 0],
-          "forward_push": 0.7,
-          "torque": 0,
-          "duration": 0.5,
-          "fade_type": "linear"
-        },
-        {
-          "time": 0.0,
-          "target": "right_upper_arm",
-          "force": [-200, 0],
-          "forward_push": 0.7,
-          "torque": 0,
-          "duration": 0.5,
-          "fade_type": "linear"
-        },
-        {
-          "time": 0.0,
-          "target": "left_thigh",
-          "force": [150, 0],
-          "forward_push": 0.6,
-          "torque": 0,
-          "duration": 0.5,
-          "fade_type": "linear"
-        },
-        {
-          "time": 0.0,
-          "target": "right_thigh",
-          "force": [-150, 0],
-          "forward_push": 0.6,
-          "torque": 0,
-          "duration": 0.5,
-          "fade_type": "linear"
-        }
-      ]
-    },
-    {
-      "name": "wave",
-      "forces": [
-        {
-          "time": 0.0,
-          "target": "right_upper_arm",
-          "force": [200, -150],
-          "forward_push": 0.5,
-          "torque": 0,
-          "duration": 0.3,
-          "fade_type": "linear"
-        },
-        {
-          "time": 0.3,
-          "target": "right_upper_arm",
-          "force": [-200, -150],
-          "forward_push": 0.5,
-          "torque": 0,
-          "duration": 0.3,
-          "fade_type": "linear"
-        },
-        {
-          "time": 0.6,
-          "target": "right_upper_arm",
-          "force": [200, -150],
-          "forward_push": 0.5,
-          "torque": 0,
-          "duration": 0.3,
-          "fade_type": "linear"
-        }
-      ]
-    },
-    {
-      "name": "lean_left",
-      "forces": [
-        {
-          "time": 0.0,
-          "target": "left_thigh",
-          "force": [-300, 0],
-          "forward_push": 0.6,
-          "torque": 0,
-          "duration": 0.4,
-          "fade_type": "linear"
-        },
-        {
-          "time": 0.0,
-          "target": "right_thigh",
-          "force": [300, 0],
-          "forward_push": 0.6,
-          "torque": 0,
-          "duration": 0.4,
-          "fade_type": "linear"
-        }
-      ]
+      "name": "pulse",
+      "duration_seconds": 6,
+      "pattern": [0.8, 0.2, 0.8, 0.2]
     }
   ]
 }
